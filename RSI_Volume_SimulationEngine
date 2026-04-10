@@ -1,0 +1,173 @@
+#include <iostream>
+#include <cstdlib>
+#include <ctime>
+
+using namespace std;
+
+// ================= RISK MANAGER =================
+struct RiskManager {
+    double maxDrawdown = 0.10;
+    double riskPerTrade = 0.01;
+    double dailyLossLimit = 0.05;
+
+    double peakEquity = 10000;
+    bool halted = false;
+
+    int getPositionSize(double cash, double price) {
+        double riskAmount = cash * riskPerTrade;
+        int size = (int)(riskAmount / price);
+        return (size < 1) ? 1 : size;
+    }
+
+    void updateEquity(double equity) {
+        if (equity > peakEquity)
+            peakEquity = equity;
+
+        double dd = (peakEquity - equity) / peakEquity;
+        if (dd > maxDrawdown) {
+            halted = true;
+            cout << "!!! MAX DRAWDOWN HIT !!!\n";
+        }
+    }
+
+    void checkLoss(double equity, double initial) {
+        double loss = (initial - equity) / initial;
+        if (loss > dailyLossLimit) {
+            halted = true;
+            cout << "!!! DAILY LOSS LIMIT HIT !!!\n";
+        }
+    }
+};
+
+// ================= RSI =================
+double calculateRSI(double avgGain, double avgLoss) {
+    if (avgLoss == 0) return 100;
+    double rs = avgGain / avgLoss;
+    return 100 - (100 / (1 + rs));
+}
+
+// ================= MAIN =================
+int main() {
+    srand(time(0));
+
+    double price = 100.0;
+    double cash = 10000;
+    int shares = 0;
+    double initial = cash;
+    double entryPrice = 0;
+
+    // 📊 PnL SYSTEM
+    double realizedPnL = 0;
+    double unrealizedPnL = 0;
+
+    double avgGain = 0, avgLoss = 0;
+    int period = 14;
+
+    RiskManager risk;
+
+    bool running = false;
+    char command;
+    int tick = 0;
+
+    cout << "=== PnL + RISK TRADING ENGINE ===\n";
+    cout << "s=start | x=stop | q=quit\n";
+
+    while (true) {
+        cout << "\ncmd: ";
+        cin >> command;
+
+        if (command == 'q') break;
+        if (command == 's') {
+            running = true;
+            cout << "STARTED\n";
+        }
+        if (command == 'x') {
+            running = false;
+            cout << "STOPPED\n";
+        }
+
+        while (running && !risk.halted) {
+
+            // ================= MARKET =================
+            double change = (rand() % 100 - 50) * 0.1;
+            price += change;
+
+            double gain = (change > 0) ? change : 0;
+            double loss = (change < 0) ? -change : 0;
+
+            avgGain = ((avgGain * (period - 1)) + gain) / period;
+            avgLoss = ((avgLoss * (period - 1)) + loss) / period;
+
+            double rsi = calculateRSI(avgGain, avgLoss);
+
+            // ================= UNREALIZED PnL =================
+            unrealizedPnL = shares * (price - entryPrice);
+
+            double equity = cash + shares * price;
+            risk.updateEquity(equity);
+            risk.checkLoss(equity, initial);
+
+            if (risk.halted) break;
+
+            // ================= BUY =================
+            if (rsi < 30 && cash > price) {
+                int qty = risk.getPositionSize(cash, price);
+
+                if (qty * price <= cash) {
+                    cash -= qty * price;
+                    shares += qty;
+                    entryPrice = price;
+                    cout << "BUY " << qty << " @ " << price << endl;
+                }
+            }
+
+            // ================= SELL =================
+            if (rsi > 70 && shares > 0) {
+
+                // 💰 REALIZED PnL update
+                realizedPnL += shares * (price - entryPrice);
+
+                cash += shares * price;
+                cout << "SELL ALL @ " << price << endl;
+                shares = 0;
+            }
+
+            // ================= STOP LOSS =================
+            if (shares > 0 && price < entryPrice * 0.98) {
+
+                realizedPnL += shares * (price - entryPrice);
+
+                cash += shares * price;
+                cout << "STOP LOSS EXIT @ " << price << endl;
+                shares = 0;
+            }
+
+            // ================= OUTPUT =================
+            if (tick % 3 == 0) {
+                cout << "Price: " << price
+                     << " | RSI: " << rsi
+                     << " | Shares: " << shares
+                     << " | Cash: " << cash
+                     << " | Unrealized PnL: " << unrealizedPnL
+                     << " | Realized PnL: " << realizedPnL
+                     << " | Total PnL: " << (realizedPnL + unrealizedPnL)
+                     << endl;
+            }
+
+            tick++;
+
+            if (cin.rdbuf()->in_avail()) {
+                cin >> command;
+                if (command == 'x') {
+                    running = false;
+                    cout << "STOPPED\n";
+                    break;
+                }
+            }
+        }
+    }
+
+    cout << "FINAL REALIZED PnL: " << realizedPnL << endl;
+    cout << "PROGRAM ENDED\n";
+    return 0;
+}
