@@ -4,84 +4,61 @@
 
 using namespace std;
 
-// ================= RISK MANAGER =================
-struct RiskManager {
-    double maxDrawdown = 0.10;
-    double riskPerTrade = 0.01;
-    double dailyLossLimit = 0.05;
-
+// ================= RISK =================
+struct Risk {
     double peakEquity = 10000;
     bool halted = false;
 
-    int getPositionSize(double cash, double price) {
-        double riskAmount = cash * riskPerTrade;
-        int size = (int)(riskAmount / price);
-        return (size < 1) ? 1 : size;
-    }
+    double maxDrawdown = 0.10;
 
-    void updateEquity(double equity) {
+    void check(double equity) {
         if (equity > peakEquity)
             peakEquity = equity;
 
         double dd = (peakEquity - equity) / peakEquity;
+
         if (dd > maxDrawdown) {
             halted = true;
-            cout << "!!! MAX DRAWDOWN HIT !!!\n";
-        }
-    }
-
-    void checkLoss(double equity, double initial) {
-        double loss = (initial - equity) / initial;
-        if (loss > dailyLossLimit) {
-            halted = true;
-            cout << "!!! DAILY LOSS LIMIT HIT !!!\n";
+            cout << "\n*** RISK HALT: DRAWDOWN LIMIT ***\n";
         }
     }
 };
-
-// ================= RSI =================
-double calculateRSI(double avgGain, double avgLoss) {
-    if (avgLoss == 0) return 100;
-    double rs = avgGain / avgLoss;
-    return 100 - (100 / (1 + rs));
-}
 
 // ================= MAIN =================
 int main() {
     srand(time(0));
 
-    double price = 100.0;
+    double price = 100;
     double cash = 10000;
     int shares = 0;
-    double initial = cash;
-    double entryPrice = 0;
 
-    // 📊 PnL SYSTEM
+    double entry = 0;
     double realizedPnL = 0;
-    double unrealizedPnL = 0;
 
-    double avgGain = 0, avgLoss = 0;
-    int period = 14;
+    double ema = 100;          // trend filter
+    double volatility = 1;
 
-    RiskManager risk;
+    int cooldown = 0;
+
+    Risk risk;
 
     bool running = false;
-    char command;
+    char cmd;
     int tick = 0;
 
-    cout << "=== PnL + RISK TRADING ENGINE ===\n";
+    cout << "=== HIGH PnL EFFICIENCY SIM ===\n";
     cout << "s=start | x=stop | q=quit\n";
 
     while (true) {
         cout << "\ncmd: ";
-        cin >> command;
+        cin >> cmd;
 
-        if (command == 'q') break;
-        if (command == 's') {
+        if (cmd == 'q') break;
+        if (cmd == 's') {
             running = true;
-            cout << "STARTED\n";
+            cout << "RUNNING HIGH QUALITY MODE\n";
         }
-        if (command == 'x') {
+        if (cmd == 'x') {
             running = false;
             cout << "STOPPED\n";
         }
@@ -92,82 +69,82 @@ int main() {
             double change = (rand() % 100 - 50) * 0.1;
             price += change;
 
-            double gain = (change > 0) ? change : 0;
-            double loss = (change < 0) ? -change : 0;
+            // EMA trend (fast)
+            ema = 0.9 * ema + 0.1 * price;
 
-            avgGain = ((avgGain * (period - 1)) + gain) / period;
-            avgLoss = ((avgLoss * (period - 1)) + loss) / period;
-
-            double rsi = calculateRSI(avgGain, avgLoss);
-
-            // ================= UNREALIZED PnL =================
-            unrealizedPnL = shares * (price - entryPrice);
+            // volatility estimate
+            volatility = 0.9 * volatility + 0.1 * abs(change);
 
             double equity = cash + shares * price;
-            risk.updateEquity(equity);
-            risk.checkLoss(equity, initial);
+            risk.check(equity);
 
             if (risk.halted) break;
 
-            // ================= BUY =================
-            if (rsi < 30 && cash > price) {
-                int qty = risk.getPositionSize(cash, price);
-
-                if (qty * price <= cash) {
-                    cash -= qty * price;
-                    shares += qty;
-                    entryPrice = price;
-                    cout << "BUY " << qty << " @ " << price << endl;
-                }
+            // ================= COOLDOWN =================
+            if (cooldown > 0) {
+                cooldown--;
             }
 
-            // ================= SELL =================
-            if (rsi > 70 && shares > 0) {
+            // ================= SIGNAL LOGIC =================
 
-                // 💰 REALIZED PnL update
-                realizedPnL += shares * (price - entryPrice);
+            bool upTrend = price > ema;
+            bool strongMove = abs(price - ema) > 1.0;
+            bool lowVol = volatility < 2.0;
 
-                cash += shares * price;
-                cout << "SELL ALL @ " << price << endl;
-                shares = 0;
+            // BUY only in strong trend + low noise
+            if (cooldown == 0 &&
+                upTrend &&
+                strongMove &&
+                lowVol &&
+                cash > price) {
+
+                int qty = (int)(cash * 0.02 / price); // 2% exposure
+                if (qty < 1) qty = 1;
+
+                cash -= qty * price;
+                shares += qty;
+                entry = price;
+
+                cooldown = 5; // prevent overtrading
+
+                cout << "BUY " << qty << " @ " << price << endl;
             }
 
-            // ================= STOP LOSS =================
-            if (shares > 0 && price < entryPrice * 0.98) {
+            // SELL condition (trend reversal or profit)
+            if (shares > 0 &&
+               (!upTrend || price > entry * 1.02)) {
 
-                realizedPnL += shares * (price - entryPrice);
-
+                realizedPnL += shares * (price - entry);
                 cash += shares * price;
-                cout << "STOP LOSS EXIT @ " << price << endl;
                 shares = 0;
+
+                cooldown = 5;
+
+                cout << "SELL EXIT @ " << price << endl;
             }
 
             // ================= OUTPUT =================
-            if (tick % 3 == 0) {
-                cout << "Price: " << price
-                     << " | RSI: " << rsi
-                     << " | Shares: " << shares
-                     << " | Cash: " << cash
-                     << " | Unrealized PnL: " << unrealizedPnL
-                     << " | Realized PnL: " << realizedPnL
-                     << " | Total PnL: " << (realizedPnL + unrealizedPnL)
+            if (tick % 5 == 0) {
+                cout << "P:" << price
+                     << " EMA:" << ema
+                     << " V:" << volatility
+                     << " PnL:" << (realizedPnL + shares * (price - entry))
                      << endl;
             }
 
             tick++;
 
+            // fast loop (no sleep for efficiency)
             if (cin.rdbuf()->in_avail()) {
-                cin >> command;
-                if (command == 'x') {
+                cin >> cmd;
+                if (cmd == 'x') {
                     running = false;
-                    cout << "STOPPED\n";
                     break;
                 }
             }
         }
     }
 
-    cout << "FINAL REALIZED PnL: " << realizedPnL << endl;
-    cout << "PROGRAM ENDED\n";
+    cout << "\nFINAL PnL: " << realizedPnL << endl;
     return 0;
 }
