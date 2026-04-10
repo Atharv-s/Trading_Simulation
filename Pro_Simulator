@@ -1,0 +1,120 @@
+#include <iostream>
+#include <curl/curl.h>
+#include <string>
+
+using namespace std;
+
+string POLYGON_KEY = "YOUR_POLYGON_KEY";
+string FINNHUB_KEY = "YOUR_FINNHUB_KEY";
+
+size_t writeCallback(void* contents, size_t size, size_t nmemb, string* output) {
+    output->append((char*)contents, size * nmemb);
+    return size * nmemb;
+}
+
+// ================= POLYGON PRICE =================
+double getPolygonPrice(string symbol) {
+    CURL* curl = curl_easy_init();
+    string response;
+
+    string url = "https://api.polygon.io/v2/last/trade/" + symbol +
+                 "?apiKey=" + POLYGON_KEY;
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+    curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    size_t pos = response.find("\"p\":");
+    if (pos == string::npos) return -1;
+
+    pos += 4;
+    size_t end = response.find(",", pos);
+
+    return atof(response.substr(pos, end - pos).c_str());
+}
+
+// ================= FINNHUB PRICE =================
+double getFinnhubPrice(string symbol) {
+    CURL* curl = curl_easy_init();
+    string response;
+
+    string url = "https://finnhub.io/api/v1/quote?symbol=" +
+                 symbol + "&token=" + FINNHUB_KEY;
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+    curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    size_t pos = response.find("\"c\":");
+    if (pos == string::npos) return -1;
+
+    pos += 4;
+    size_t end = response.find(",", pos);
+
+    return atof(response.substr(pos, end - pos).c_str());
+}
+
+// ================= BEST PRICE SELECTION =================
+double getBestPrice(string symbol) {
+    double p1 = getPolygonPrice(symbol);
+    double p2 = getFinnhubPrice(symbol);
+
+    if (p1 > 0) return p1;
+    if (p2 > 0) return p2;
+
+    return -1;
+}
+
+// ================= MAIN =================
+int main() {
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+
+    string symbol = "AAPL";
+
+    double cash = 10000;
+    double shares = 0;
+    double entry = 0;
+
+    cout << "=== DUAL FEED NYSE TRADING SIM ===\n";
+
+    while (true) {
+
+        double price = getBestPrice(symbol);
+
+        if (price <= 0) {
+            cout << "DATA ERROR\n";
+            continue;
+        }
+
+        // SIMPLE MOMENTUM STRATEGY
+        if (shares == 0) {
+            shares = cash * 0.1 / price;
+            cash -= shares * price;
+            entry = price;
+            cout << "BUY @ " << price << endl;
+        }
+
+        if (shares > 0 && price > entry * 1.01) {
+            cash += shares * price;
+            shares = 0;
+            cout << "SELL @ " << price << endl;
+        }
+
+        double equity = cash + shares * price;
+
+        cout << "Price: " << price
+             << " | Equity: " << equity
+             << endl;
+
+        for (volatile long i = 0; i < 50000000; i++); // small delay
+    }
+
+    curl_global_cleanup();
+    return 0;
+}
