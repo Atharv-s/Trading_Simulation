@@ -1,32 +1,36 @@
 #include <iostream>
 #include <string>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
-#include <curl/curl.h>
 #include <thread>
 #include <chrono>
 
 using namespace std;
 
-// ================= CURL =================
-size_t writeCallback(void* contents, size_t size, size_t nmemb, string* output) {
-    output->append((char*)contents, size * nmemb);
-    return size * nmemb;
+// run system curl
+string exec(const char* cmd) {
+    char buffer[128];
+    string result = "";
+
+    FILE* pipe = popen(cmd, "r");
+    if (!pipe) return "";
+
+    while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
+        result += buffer;
+    }
+
+    pclose(pipe);
+    return result;
 }
 
-// ================= GET PRICE =================
+// get live price
 double getPrice(string symbol) {
-    CURL* curl = curl_easy_init();
-    string response;
 
-    string url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + symbol;
+    string cmd = "curl -s \"https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + symbol + "\"";
+    string response = exec(cmd.c_str());
 
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0");
-
-    curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
+    if (response.empty()) return -1;
 
     size_t pos = response.find("\"regularMarketPrice\":");
     if (pos == string::npos) return -1;
@@ -37,90 +41,51 @@ double getPrice(string symbol) {
     return atof(response.substr(pos, end - pos).c_str());
 }
 
-// ================= SIMPLE MOVING AVERAGE =================
-double SMA(vector<double>& prices, int period) {
-    if (prices.size() < period) return 0;
-
-    double sum = 0;
-    for (int i = prices.size() - period; i < prices.size(); i++) {
-        sum += prices[i];
-    }
-    return sum / period;
-}
-
-// ================= MAIN =================
 int main() {
 
     string symbol = "AMZN";
-
-    vector<double> prices;
 
     double cash = 10000;
     double shares = 0;
     double entry = 0;
 
-    bool armed = false; // pullback confirmation flag
-
-    cout << "=== AMZN TREND + PULLBACK SIM ===\n";
+    cout << "=== ONLINEGDB LIVE AMZN SIM ===\n";
 
     while (true) {
 
         double price = getPrice(symbol);
 
         if (price <= 0) {
-            cout << "DATA ERROR\n";
+            cout << "DATA ERROR (API blocked or market closed)\n";
             this_thread::sleep_for(chrono::seconds(2));
             continue;
         }
 
-        prices.push_back(price);
+        cout << "Price: " << price << endl;
 
-        double ma20 = SMA(prices, 20);
-
-        cout << "Price: " << price << " | MA20: " << ma20 << endl;
-
-        // need enough data
-        if (prices.size() < 20) {
-            this_thread::sleep_for(chrono::seconds(2));
-            continue;
-        }
-
-        // ================= TREND FILTER =================
-        bool uptrend = price > ma20;
-
-        // ================= PULLBACK DETECTION =================
-        if (uptrend && price < ma20 * 0.995) {
-            armed = true; // pullback detected
-            cout << "PULLBACK ARMED\n";
-        }
-
-        // ================= ENTRY =================
-        if (armed && price > ma20 && shares == 0) {
-
-            double invest = cash * 0.1;
-            shares = invest / price;
+        // BUY
+        if (shares == 0) {
+            shares = (cash * 0.1) / price;
             cash -= shares * price;
-
             entry = price;
-            armed = false;
 
-            cout << "BUY (TREND + PULLBACK) @ " << price << endl;
+            cout << "BUY @ " << price << endl;
         }
 
-        // ================= EXIT =================
-        if (shares > 0) {
+        // SELL
+        if (shares > 0 && price > entry * 1.01) {
+            cash += shares * price;
+            shares = 0;
 
-            if (price > entry * 1.015) {
-                cash += shares * price;
-                shares = 0;
-                cout << "TAKE PROFIT @ " << price << endl;
-            }
+            cout << "SELL @ " << price << endl;
+        }
 
-            if (price < entry * 0.99) {
-                cash += shares * price;
-                shares = 0;
-                cout << "STOP LOSS @ " << price << endl;
-            }
+        // STOP LOSS
+        if (shares > 0 && price < entry * 0.99) {
+            cash += shares * price;
+            shares = 0;
+
+            cout << "STOP LOSS @ " << price << endl;
         }
 
         double equity = cash + shares * price;
@@ -129,4 +94,6 @@ int main() {
 
         this_thread::sleep_for(chrono::seconds(2));
     }
+
+    return 0;
 }
