@@ -1,95 +1,98 @@
 #include <iostream>
 #include <string>
 #include <cstdio>
-#include <cstdlib>
-#include <vector>
+#include <memory>
 #include <thread>
 #include <chrono>
 
 using namespace std;
 
-// run system curl
-string exec(const char* cmd) {
-    char buffer[128];
-    string result = "";
+// safer exec with RAII
+string exec(const string& cmd) {
+    array<char, 256> buffer;
+    string result;
 
-    FILE* pipe = popen(cmd, "r");
+    unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
     if (!pipe) return "";
 
-    while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
-        result += buffer;
+    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+        result += buffer.data();
     }
 
-    pclose(pipe);
     return result;
 }
 
-// get live price
-double getPrice(string symbol) {
+// faster + safer price extraction
+double extractPrice(const string& response) {
+    const string key = "\"regularMarketPrice\":";
+    size_t pos = response.find(key);
 
-    string cmd = "curl -s \"https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + symbol + "\"";
-    string response = exec(cmd.c_str());
-
-    if (response.empty()) return -1;
-
-    size_t pos = response.find("\"regularMarketPrice\":");
     if (pos == string::npos) return -1;
 
-    pos += 22;
-    size_t end = response.find(",", pos);
+    pos += key.length();
 
-    return atof(response.substr(pos, end - pos).c_str());
+    char* endPtr;
+    double price = strtod(response.c_str() + pos, &endPtr);
+
+    return (endPtr == response.c_str() + pos) ? -1 : price;
+}
+
+double getPrice(const string& symbol) {
+    static const string base =
+        "curl -s --connect-timeout 2 \"https://query1.finance.yahoo.com/v7/finance/quote?symbols=";
+
+    string response = exec(base + symbol + "\"");
+    if (response.empty()) return -1;
+
+    return extractPrice(response);
 }
 
 int main() {
+    const string symbol = "AMZN";
 
-    string symbol = "AMZN";
+    double cash = 10000.0;
+    double shares = 0.0;
+    double entry = 0.0;
 
-    double cash = 10000;
-    double shares = 0;
-    double entry = 0;
-
-    cout << "=== ONLINEGDB LIVE AMZN SIM ===\n";
+    cout << "=== LIVE TRADING SIM ===\n";
 
     while (true) {
-
         double price = getPrice(symbol);
 
         if (price <= 0) {
-            cout << "DATA ERROR (API blocked or market closed)\n";
+            cout << "DATA ERROR\n";
             this_thread::sleep_for(chrono::seconds(2));
             continue;
         }
 
-        cout << "Price: " << price << endl;
+        cout << "Price: " << price << "\n";
 
-        // BUY
-        if (shares == 0) {
+        // BUY (10% allocation)
+        if (shares == 0.0) {
             shares = (cash * 0.1) / price;
             cash -= shares * price;
             entry = price;
 
-            cout << "BUY @ " << price << endl;
+            cout << "BUY @ " << price << "\n";
         }
 
-        // SELL
-        if (shares > 0 && price > entry * 1.01) {
+        // SELL (take profit)
+        else if (price >= entry * 1.01) {
             cash += shares * price;
-            shares = 0;
+            shares = 0.0;
 
-            cout << "SELL @ " << price << endl;
+            cout << "SELL @ " << price << "\n";
         }
 
         // STOP LOSS
-        if (shares > 0 && price < entry * 0.99) {
+        else if (price <= entry * 0.99) {
             cash += shares * price;
-            shares = 0;
+            shares = 0.0;
 
-            cout << "STOP LOSS @ " << price << endl;
+            cout << "STOP LOSS @ " << price << "\n";
         }
 
         double equity = cash + shares * price;
-
         cout << "Equity: " << equity << "\n\n";
 
         this_thread::sleep_for(chrono::seconds(2));
