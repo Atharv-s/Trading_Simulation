@@ -4,10 +4,14 @@
 #include <memory>
 #include <thread>
 #include <chrono>
+#include <array>
+#include <vector>
+#include <algorithm>
 
 using namespace std;
 
-// safer exec with RAII
+//==================== UTIL ====================//
+
 string exec(const string& cmd) {
     array<char, 256> buffer;
     string result;
@@ -22,7 +26,6 @@ string exec(const string& cmd) {
     return result;
 }
 
-// faster + safer price extraction
 double extractPrice(const string& response) {
     const string key = "\"regularMarketPrice\":";
     size_t pos = response.find(key);
@@ -47,6 +50,19 @@ double getPrice(const string& symbol) {
     return extractPrice(response);
 }
 
+//==================== VOLATILITY ====================//
+
+double calculateVolatility(const vector<double>& prices) {
+    if (prices.size() < 2) return 0.0;
+
+    double maxP = *max_element(prices.begin(), prices.end());
+    double minP = *min_element(prices.begin(), prices.end());
+
+    return (maxP - minP) / minP; // simple range-based volatility
+}
+
+//==================== MAIN ====================//
+
 int main() {
     const string symbol = "AMZN";
 
@@ -54,7 +70,18 @@ int main() {
     double shares = 0.0;
     double entry = 0.0;
 
-    cout << "=== LIVE TRADING SIM ===\n";
+    double maxEquity = cash;
+
+    const double riskPerTrade = 0.01;   // 1%
+    const double maxDrawdown = 0.10;    // 10%
+    const int cooldownSec = 10;
+
+    vector<double> priceHistory;
+    const size_t maxHistory = 20;
+
+    auto lastTradeTime = chrono::steady_clock::now();
+
+    cout << "=== LIVE TRADING SIM (ADVANCED RM) ===\n";
 
     while (true) {
         double price = getPrice(symbol);
@@ -65,35 +92,81 @@ int main() {
             continue;
         }
 
-        cout << "Price: " << price << "\n";
+        // store price history
+        priceHistory.push_back(price);
+        if (priceHistory.size() > maxHistory)
+            priceHistory.erase(priceHistory.begin());
 
-        // BUY (10% allocation)
-        if (shares == 0.0) {
-            shares = (cash * 0.1) / price;
-            cash -= shares * price;
-            entry = price;
-
-            cout << "BUY @ " << price << "\n";
-        }
-
-        // SELL (take profit)
-        else if (price >= entry * 1.01) {
-            cash += shares * price;
-            shares = 0.0;
-
-            cout << "SELL @ " << price << "\n";
-        }
-
-        // STOP LOSS
-        else if (price <= entry * 0.99) {
-            cash += shares * price;
-            shares = 0.0;
-
-            cout << "STOP LOSS @ " << price << "\n";
-        }
+        double volatility = calculateVolatility(priceHistory);
 
         double equity = cash + shares * price;
-        cout << "Equity: " << equity << "\n\n";
+        maxEquity = max(maxEquity, equity);
+
+        // 🔴 Max drawdown protection
+        if ((maxEquity - equity) / maxEquity > maxDrawdown) {
+            cout << "MAX DRAWDOWN HIT. STOPPING.\n";
+            break;
+        }
+
+        cout << "Price: " << price 
+             << " | Volatility: " << volatility << "\n";
+
+        auto now = chrono::steady_clock::now();
+        bool cooldownPassed =
+            chrono::duration_cast<chrono::seconds>(now - lastTradeTime).count() > cooldownSec;
+
+        //==================== ENTRY ====================//
+        if (shares == 0.0 && cooldownPassed && volatility > 0.002) {
+            double riskAmount = equity * riskPerTrade;
+
+            // dynamic stop based on volatility
+            double stopLossPct = max(0.005, volatility * 0.5);
+            double stopDistance = price * stopLossPct;
+
+            shares = riskAmount / stopDistance;
+
+            // cap by available cash
+            if (shares * price > cash)
+                shares = cash / price;
+
+            cash -= shares * price;
+            entry = price;
+            lastTradeTime = now;
+
+            cout << "BUY @ " << price
+                 << " | Shares: " << shares
+                 << " | SL%: " << stopLossPct << "\n";
+        }
+
+        //==================== EXIT ====================//
+        else if (shares > 0.0) {
+            double stopLossPct = max(0.005, volatility * 0.5);
+
+            double takeProfit = entry * (1.0 + stopLossPct * 2.0); // RR 1:2
+            double stopLoss = entry * (1.0 - stopLossPct);
+
+            if (price >= takeProfit) {
+                cash += shares * price;
+
+                cout << "TAKE PROFIT @ " << price << "\n";
+
+                shares = 0.0;
+                lastTradeTime = now;
+            }
+            else if (price <= stopLoss) {
+                cash += shares * price;
+
+                cout << "STOP LOSS @ " << price << "\n";
+
+                shares = 0.0;
+                lastTradeTime = now;
+            }
+        }
+
+        equity = cash + shares * price;
+
+        cout << "Cash: " << cash
+             << " | Equity: " << equity << "\n\n";
 
         this_thread::sleep_for(chrono::seconds(2));
     }
