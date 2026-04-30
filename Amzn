@@ -26,28 +26,28 @@ string exec(const string& cmd) {
     return result;
 }
 
-double extractPrice(const string& response) {
-    const string key = "\"regularMarketPrice\":";
+double extractValue(const string& response, const string& key) {
     size_t pos = response.find(key);
-
     if (pos == string::npos) return -1;
 
     pos += key.length();
 
     char* endPtr;
-    double price = strtod(response.c_str() + pos, &endPtr);
+    double val = strtod(response.c_str() + pos, &endPtr);
 
-    return (endPtr == response.c_str() + pos) ? -1 : price;
+    return (endPtr == response.c_str() + pos) ? -1 : val;
 }
 
-double getPrice(const string& symbol) {
+double extractPrice(const string& response) {
+    return extractValue(response, "\"regularMarketPrice\":");
+}
+
+double getResponse(const string& symbol, string& response) {
     static const string base =
         "curl -s --connect-timeout 2 \"https://query1.finance.yahoo.com/v7/finance/quote?symbols=";
 
-    string response = exec(base + symbol + "\"");
-    if (response.empty()) return -1;
-
-    return extractPrice(response);
+    response = exec(base + symbol + "\"");
+    return response.empty() ? -1 : 0;
 }
 
 //==================== INDICATORS ====================//
@@ -60,9 +60,9 @@ class RollingSMA {
 public:
     RollingSMA(int p) : period(p) {}
 
-    double update(double price) {
-        window.push_back(price);
-        sum += price;
+    double update(double val) {
+        window.push_back(val);
+        sum += val;
 
         if (window.size() > period) {
             sum -= window.front();
@@ -73,26 +73,102 @@ public:
     }
 };
 
-class RollingVolatility {
-    deque<double> returns;
+class ATR {
     int period;
+    double atr = 0.0;
+    int count = 0;
+    bool initialized = false;
 
 public:
-    RollingVolatility(int p) : period(p) {}
+    ATR(int p) : period(p) {}
 
-    double update(double prev, double curr) {
-        double r = (curr - prev) / prev;
-        returns.push_back(abs(r));
+    double update(double high, double low, double prevClose) {
+        double tr = max({
+            high - low,
+            abs(high - prevClose),
+            abs(low - prevClose)
+        });
 
-        if (returns.size() > period)
-            returns.pop_front();
+        if (!initialized) {
+            atr += tr;
+            count++;
 
-        double sum = 0.0;
-        for (double x : returns) sum += x;
+            if (count == period) {
+                atr /= period;
+                initialized = true;
+            }
 
-        return returns.empty() ? 0.0 : sum / returns.size();
+            return atr;
+        }
+
+        atr = (atr * (period - 1) + tr) / period;
+        return atr;
     }
 };
+
+//==================== FEATURE SYSTEM ====================//
+
+enum MarketRegime {
+    TRENDING,
+    RANGING
+};
+
+struct FeatureConfig {
+    bool useATR = true;
+    bool useRegime = true;
+
+    int atrPeriod = 14;
+
+    double minTrendStrength = 0.002; // MA separation
+    double minATR = 0.001;           // volatility threshold
+};
+
+struct FeatureState {
+    double atr = 0.0;
+    MarketRegime regime = RANGING;
+};
+
+class FeatureEngine {
+    FeatureConfig config;
+    ATR atrCalc;
+
+public:
+    FeatureEngine(const FeatureConfig& cfg)
+        : config(cfg),
+          atrCalc(cfg.atrPeriod) {}
+
+    FeatureState update(double prevPrice,
+                        double price,
+                        double fastMA,
+                        double slowMA) {
+
+        FeatureState state;
+
+        // ATR (approximation since no OHLC)
+        if (config.useATR && prevPrice > 0) {
+            double high = price;
+            double low = price;
+            state.atr = atrCalc.update(high, low, prevPrice);
+        }
+
+        // Regime detection
+        if (config.useRegime) {
+            double trendStrength = abs(fastMA - slowMA) / price;
+
+            bool trending =
+                trendStrength > config.minTrendStrength &&
+                state.atr > config.minATR;
+
+            state.regime = trending ? TRENDING : RANGING;
+        }
+
+        return state;
+    }
+
+    const FeatureConfig& getConfig() const { return config; }
+};
+
+//==================== STRATEGY ====================//
 
 double momentum(const deque<double>& data, int lookback) {
     if (data.size() < lookback + 1) return 0.0;
@@ -117,21 +193,27 @@ int main() {
 
     RollingSMA fastMA(5);
     RollingSMA slowMA(20);
-    RollingVolatility volCalc(20);
+
+    FeatureConfig config;
+    FeatureEngine features(config);
 
     deque<double> prices;
 
     double prevPrice = 0.0;
-
     auto lastTradeTime = chrono::steady_clock::now();
 
-    cout << "=== LIVE TRADING SIM (OPTIMIZED) ===\n";
+    cout << "=== LIVE TRADING SIM (ATR + REGIME) ===\n";
 
     int tick = 0;
 
     while (true) {
-        double price = getPrice(symbol);
+        string response;
+        if (getResponse(symbol, response) < 0) {
+            this_thread::sleep_for(chrono::seconds(2));
+            continue;
+        }
 
+        double price = extractPrice(response);
         if (price <= 0) {
             this_thread::sleep_for(chrono::seconds(2));
             continue;
@@ -145,16 +227,13 @@ int main() {
         double smaSlow = slowMA.update(price);
         double mom = momentum(prices, 5);
 
-        double vol = (prevPrice > 0)
-            ? volCalc.update(prevPrice, price)
-            : 0.0;
+        FeatureState fs = features.update(prevPrice, price, fma, smaSlow);
 
         prevPrice = price;
 
         double equity = cash + shares * price;
         maxEquity = max(maxEquity, equity);
 
-        // Drawdown protection
         if ((maxEquity - equity) / maxEquity > maxDrawdown) {
             cout << "MAX DRAWDOWN HIT. STOPPING.\n";
             break;
@@ -163,21 +242,25 @@ int main() {
         auto now = chrono::steady_clock::now();
         bool cooldownPassed = (now - lastTradeTime) > chrono::seconds(cooldownSec);
 
-        double stopLossPct = max(0.005, vol * 2.0);
-
-        //==================== ENTRY ====================//
         bool trendUp = fma > smaSlow;
+        bool trendDown = fma < smaSlow;
         bool momentumUp = mom > 0.001;
 
-        if (shares == 0.0 && cooldownPassed && trendUp && momentumUp) {
-            double riskAmount = equity * riskPerTrade;
-            double stopDistance = price * stopLossPct;
+        bool allowTrading = !config.useRegime ||
+                            (fs.regime == TRENDING);
 
+        //==================== ENTRY ====================//
+        if (shares == 0.0 && cooldownPassed &&
+            trendUp && momentumUp && allowTrading) {
+
+            double stopDistance = fs.atr * 2.0;
+            if (stopDistance <= 0) continue;
+
+            double riskAmount = equity * riskPerTrade;
             double newShares = riskAmount / stopDistance;
 
-            // clamp position size
             newShares = min(newShares, cash / price);
-            newShares = min(newShares, 100.0); // hard cap
+            newShares = min(newShares, 100.0);
 
             if (newShares > 0) {
                 shares = newShares;
@@ -186,17 +269,15 @@ int main() {
                 lastTradeTime = now;
 
                 cout << "BUY @ " << price
-                     << " | Shares: " << shares
-                     << " | SL%: " << stopLossPct << "\n";
+                     << " | ATR: " << fs.atr
+                     << " | Regime: TREND\n";
             }
         }
 
         //==================== EXIT ====================//
         else if (shares > 0.0) {
-            double stopLoss = entry * (1.0 - stopLossPct);
-            double takeProfit = entry * (1.0 + stopLossPct * 2.0);
-
-            bool trendDown = fma < smaSlow;
+            double stopLoss = entry - (fs.atr * 2.0);
+            double takeProfit = entry + (fs.atr * 4.0);
 
             if (price >= takeProfit) {
                 cash += shares * price;
@@ -210,26 +291,24 @@ int main() {
                 shares = 0.0;
                 lastTradeTime = now;
 
-                cout << "EXIT (SL/Trend) @ " << price << "\n";
+                cout << "EXIT @ " << price << "\n";
             }
         }
 
         equity = cash + shares * price;
 
-        // reduce console spam
         if (tick % 3 == 0) {
             cout << "Price: " << price
+                 << " | ATR: " << fs.atr
+                 << " | Regime: " << (fs.regime == TRENDING ? "TREND" : "RANGE")
                  << " | FastMA: " << fma
-                 << " | SlowMA: " << smaSlow
-                 << " | Mom: " << mom
-                 << " | Vol: " << vol << "\n";
+                 << " | SlowMA: " << smaSlow << "\n";
 
             cout << "Cash: " << cash
                  << " | Equity: " << equity << "\n\n";
         }
 
         tick++;
-
         this_thread::sleep_for(chrono::seconds(5));
     }
 
