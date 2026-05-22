@@ -756,66 +756,33 @@ int main() {
 
 
 
+Low Level Design (LLD)
 
-
-
-
-
-
-
-High-Level Design (HLD)
-
-ATR + Regime-Based Algorithmic Trading Simulator
-
-Version: 1.0
-Language: C++
-Architecture Type: Event-Driven Modular Trading System
-Scope: Educational / Prototype Trading Simulator
+Live Trading Simulation System (ATR + Market Regime Engine)
 
 
 ---
 
 1. Overview
 
-The system is a lightweight algorithmic trading simulator designed to:
+The system is a lightweight real-time trading simulator written in C++.
+It continuously fetches market prices from Yahoo Finance, computes technical indicators, classifies market conditions, generates trading signals, and simulates trade execution with risk management.
 
-Fetch live market prices
+The architecture is modular and composed of:
 
-Compute technical indicators
+Market Data Layer
 
-Detect market regime
+Indicator Engine
 
-Generate trading signals
+Feature Engine
 
-Execute simulated trades
+Signal Engine
 
-Apply risk management rules
+Risk Management
 
+Trade Execution Simulator
 
-The simulator currently trades a single asset using:
-
-Simple Moving Average (SMA) crossover
-
-Momentum confirmation
-
-ATR-based volatility filtering
-
-Market regime classification
-
-
-The architecture is modular and extensible, enabling future integration of:
-
-Real broker APIs
-
-Multi-symbol support
-
-Historical backtesting
-
-Advanced indicators
-
-Persistent storage
-
-Portfolio management
+Portfolio Tracking
 
 
 
@@ -825,199 +792,693 @@ Portfolio management
 
 Functional Goals
 
-Retrieve live market data
+Fetch live market price data
 
-Calculate technical indicators
+Compute SMA indicators
 
-Identify trend/range conditions
+Compute ATR-based volatility
+
+Detect market regime
 
 Generate buy/sell signals
 
 Simulate order execution
 
-Manage portfolio equity
+Apply risk management
 
-Apply risk controls
+Track portfolio equity
 
 
 Non-Functional Goals
 
-Low complexity
+Low memory footprint
 
-Modular design
+O(1) indicator updates
 
-Easy extensibility
+Modular architecture
 
-Educational readability
+Easy feature extension
 
-Lightweight runtime
+Real-time loop execution
 
-
-
----
-
-3. System Architecture
-
-+------------------------------------------------+
-|                Trading Simulator               |
-+------------------------------------------------+
-                |             |
-                v             v
-      +----------------+   +----------------+
-      | Market Data    |   | Risk Engine    |
-      | Acquisition    |   +----------------+
-      +----------------+            |
-                |                   |
-                v                   v
-      +----------------+   +----------------+
-      | Indicator      |   | Feature Engine |
-      | Engine         |   | (ATR/Regime)   |
-      +----------------+   +----------------+
-                |                   |
-                +---------+---------+
-                          |
-                          v
-                +----------------+
-                | Signal Engine  |
-                +----------------+
-                          |
-                          v
-                +----------------+
-                | Execution      |
-                | Simulator      |
-                +----------------+
-                          |
-                          v
-                +----------------+
-                | Portfolio &    |
-                | Equity Tracker |
-                +----------------+
 
 
 ---
 
-4. Core Components
+3. High-Level Architecture
+
++----------------------+
+| Yahoo Finance API    |
++----------+-----------+
+           |
+           v
++----------------------+
+| Market Data Fetcher  |
++----------+-----------+
+           |
+           v
++----------------------+
+| Indicator Engine     |
+| - SMA                |
+| - ATR                |
+| - Momentum           |
++----------+-----------+
+           |
+           v
++----------------------+
+| Feature Engine       |
+| - Volatility         |
+| - Market Regime      |
++----------+-----------+
+           |
+           v
++----------------------+
+| Signal Generator     |
+| - Trend Logic        |
+| - Momentum Logic     |
++----------+-----------+
+           |
+           v
++----------------------+
+| Risk Manager         |
+| - Position Sizing    |
+| - Drawdown Control   |
++----------+-----------+
+           |
+           v
++----------------------+
+| Trade Executor       |
++----------+-----------+
+           |
+           v
++----------------------+
+| Portfolio State      |
++----------------------+
 
 
 ---
 
-4.1 Market Data Acquisition Layer
+4. Module Design
+
+
+---
+
+4.1 Utility Module
 
 Responsibility
 
-Retrieves live market data from Yahoo Finance API.
+Provides helper utilities for:
 
-Inputs
+Shell command execution
 
-Trading symbol
+API calls
 
-
-Outputs
-
-Raw JSON response
-
-Current market price
-
-
-Current Implementation
-
-Uses:
-
-curl + popen()
-
-to fetch:
-
-https://query1.finance.yahoo.com/v7/finance/quote
-
-Limitations
-
-Polling-based
-
-No websocket support
-
-Fragile JSON extraction
-
-No OHLC candle support
-
-Dependent on unofficial APIs
-
-
-Future Improvements
-
-Replace with broker-grade APIs
-
-Websocket streaming
-
-Proper REST client
-
-Historical candle retrieval
+JSON field extraction
 
 
 
 ---
 
-4.2 JSON Parsing Layer
+Functions
 
-Responsibility
+exec()
 
-Extracts numeric values from raw API responses.
+Purpose
 
-Current Approach
+Executes shell command using popen().
 
-String search + strtod().
+Signature
 
-Limitations
+string exec(const string& cmd);
 
-Schema fragile
+Input
 
-Error-prone
+Parameter	Type	Description
 
-No validation
+cmd	string	Shell command
 
 
-Future Improvements
+Output
 
-Use structured JSON parsers:
+Type	Description
 
-[nlohmann/json](https://github.com/nlohmann/json?utm_source=chatgpt.com)
+string	Command stdout
 
 
 
 ---
 
-4.3 Indicator Engine
+extractValue()
+
+Purpose
+
+Extract numeric field from JSON string.
+
+Signature
+
+double extractValue(
+    const string& response,
+    const string& key
+);
+
+
+---
+
+extractPrice()
+
+Purpose
+
+Extract Yahoo Finance market price.
+
+Signature
+
+double extractPrice(const string& response);
+
+
+---
+
+getResponse()
+
+Purpose
+
+Fetch API response using curl.
+
+Signature
+
+double getResponse(
+    const string& symbol,
+    string& response
+);
+
+
+---
+
+4.2 Rolling SMA Module
+
+Class
+
+class RollingSMA
+
+
+---
 
 Responsibility
 
-Computes technical indicators incrementally.
+Efficient moving average computation using:
 
-Indicators
+rolling window
 
-Simple Moving Average (SMA)
-
-Maintains:
-
-Rolling sum
-
-Sliding window
+rolling sum
 
 
-Momentum
+Complexity:
 
-Rate-of-change calculation:
-
-Momentum = \frac{P_{current} - P_{past}}{P_{past}}
-
-Characteristics
-
-O(1) updates
-
-Low memory usage
-
-Tick-driven computation
+Time  : O(1)
+Memory: O(period)
 
 
-Future Enhancements
+---
+
+Attributes
+
+Variable	Type	Purpose
+
+period	int	SMA period
+sum	double	Running sum
+window	deque<double>	Price window
+
+
+
+---
+
+Methods
+
+Constructor
+
+RollingSMA(int p);
+
+
+---
+
+update()
+
+Purpose
+
+Adds new value and computes SMA.
+
+Signature
+
+double update(double val);
+
+Returns
+
+Condition	Return
+
+Not initialized	0.0
+Initialized	SMA value
+
+
+
+---
+
+4.3 ATR Module
+
+Class
+
+class ATR
+
+
+---
+
+Responsibility
+
+Computes Average True Range (ATR) using Wilder smoothing.
+
+
+---
+
+Attributes
+
+Variable	Type	Description
+
+period	int	ATR period
+atr	double	Current ATR
+count	int	Warmup counter
+initialized	bool	ATR ready state
+
+
+
+---
+
+Methods
+
+Constructor
+
+ATR(int p);
+
+
+---
+
+update()
+
+Signature
+
+double update(
+    double high,
+    double low,
+    double prevClose
+);
+
+
+---
+
+Formula
+
+True Range
+
+TR = \max\left( high-low, |high-prevClose|, |low-prevClose| \right)
+
+Wilder ATR
+
+ATR_t = \frac{ATR_{t-1}(n-1)+TR_t}{n}
+
+
+---
+
+4.4 Feature Engine
+
+Class
+
+class FeatureEngine
+
+
+---
+
+Responsibility
+
+Computes:
+
+Volatility
+
+Market regime
+
+
+
+---
+
+Supporting Structures
+
+FeatureConfig
+
+Stores configuration flags.
+
+Variable	Type
+
+useATR	bool
+useRegime	bool
+atrPeriod	int
+minTrendStrength	double
+minATR	double
+
+
+
+---
+
+FeatureState
+
+Stores runtime feature values.
+
+Variable	Type
+
+atr	double
+regime	MarketRegime
+
+
+
+---
+
+Methods
+
+Constructor
+
+FeatureEngine(const FeatureConfig& cfg);
+
+
+---
+
+update()
+
+Signature
+
+FeatureState update(
+    double prevPrice,
+    double price,
+    double fastMA,
+    double slowMA
+);
+
+
+---
+
+Regime Formula
+
+TrendStrength = \frac{|FastMA - SlowMA|}{Price}
+
+
+---
+
+Regime Logic
+
+TRENDING:
+    trendStrength > minTrendStrength
+    AND
+    ATR > minATR
+
+RANGING:
+    otherwise
+
+
+---
+
+4.5 Momentum Module
+
+Function
+
+double momentum(
+    const deque<double>& data,
+    int lookback
+);
+
+
+---
+
+Responsibility
+
+Computes rate-of-change momentum.
+
+
+---
+
+Formula
+
+Momentum = \frac{CurrentPrice - PastPrice}{PastPrice}
+
+
+---
+
+4.6 Risk Management Module
+
+Responsibility
+
+Controls:
+
+Position sizing
+
+Drawdown protection
+
+ATR stop sizing
+
+
+
+---
+
+Risk Parameters
+
+Parameter	Value
+
+Risk Per Trade	1%
+Max Drawdown	10%
+Stop Multiplier	2 × ATR
+Target Multiplier	4 × ATR
+
+
+
+---
+
+Position Sizing Formula
+
+PositionSize = \frac{RiskAmount}{StopDistance}
+
+Where:
+
+RiskAmount = Equity × RiskPerTrade
+StopDistance = ATR × 2
+
+
+---
+
+4.7 Trade Execution Engine
+
+Responsibility
+
+Simulates order execution.
+
+
+---
+
+Entry Conditions
+
+BUY if:
+    - No active position
+    - Cooldown passed
+    - FastMA > SlowMA
+    - Momentum positive
+    - Market regime = TRENDING
+
+
+---
+
+Exit Conditions
+
+SELL if:
+    - Price <= stop loss
+    OR
+    - Price >= take profit
+    OR
+    - FastMA < SlowMA
+
+
+---
+
+5. State Management
+
+
+---
+
+Portfolio State
+
+Variable	Description
+
+cash	Available cash
+shares	Open position size
+entry	Entry price
+equity	Current account value
+maxEquity	Peak equity
+
+
+
+---
+
+Market State
+
+Variable	Description
+
+prevPrice	Previous market price
+prices	Historical rolling prices
+tick	Loop iteration counter
+
+
+
+---
+
+6. Sequence Flow
+
+START
+   |
+   v
+Fetch Market Data
+   |
+   v
+Extract Price
+   |
+   v
+Update Indicators
+   |
+   v
+Update Features
+   |
+   v
+Compute Equity
+   |
+   v
+Check Drawdown
+   |
+   v
+Generate Signals
+   |
+   v
+Execute Trades
+   |
+   v
+Update Portfolio
+   |
+   v
+Log Status
+   |
+   v
+Sleep 5 Seconds
+   |
+   +----> Repeat
+
+
+---
+
+7. Data Structures Used
+
+Structure	Usage
+
+deque<double>	Rolling windows
+array<char,256>	Command buffer
+unique_ptr	RAII pipe management
+enum	Market regime
+
+
+
+---
+
+8. Threading Model
+
+Current implementation:
+
+Single-threaded polling loop
+
+Potential enhancements:
+
+Async market feed
+
+Parallel indicator computation
+
+Event-driven architecture
+
+
+
+---
+
+9. Error Handling
+
+Scenario	Handling
+
+API timeout	Retry
+Empty response	Ignore tick
+Invalid price	Skip iteration
+ATR not initialized	No trade
+Drawdown exceeded	Stop system
+
+
+
+---
+
+10. Limitations
+
+Current Limitations
+
+Market Data
+
+Uses polling instead of websocket
+
+No OHLC candles
+
+ATR approximation only
+
+
+Parsing
+
+Manual JSON parsing is fragile
+
+
+Execution
+
+No slippage
+
+No commissions
+
+No order book simulation
+
+
+Strategy
+
+Single-symbol only
+
+Long-only strategy
+
+
+
+---
+
+11. Suggested Improvements
+
+Data Layer
+
+Replace curl + popen
+
+Use REST/WebSocket client
+
+Add real JSON parser
+
+
+Recommended:
+
+libcurl
+
+Boost.Beast
+
+nlohmann/json
+
+
+
+---
+
+Strategy Layer
 
 Add:
 
@@ -1025,481 +1486,150 @@ RSI
 
 MACD
 
-EMA
+Multi-timeframe confirmation
 
-Bollinger Bands
-
-VWAP
+Volume analysis
 
 
 
 ---
 
-4.4 ATR Engine
+Risk Engine
 
-Responsibility
+Add:
 
-Estimates market volatility.
+Trailing stops
 
-Current ATR Approximation
+Dynamic leverage
 
-Because OHLC data is unavailable:
-
-high = low = current_price
-
-This approximates volatility using tick movement.
-
-ATR Formula
-
-ATR_t = \frac{ATR_{t-1}(n-1)+TR_t}{n}
-
-Limitations
-
-Not true ATR
-
-Noise-sensitive
-
-Inaccurate volatility estimation
-
-
-Future Improvements
-
-Use proper OHLC candles:
-
-high
-
-low
-
-close
+Portfolio diversification
 
 
 
 ---
 
-4.5 Feature Engine
+12. Class Diagram
 
-Responsibility
++----------------+
+| RollingSMA     |
++----------------+
+| period         |
+| sum            |
+| window         |
++----------------+
+| update()       |
++----------------+
 
-Computes higher-level market features.
++----------------+
+| ATR            |
++----------------+
+| period         |
+| atr            |
+| initialized    |
++----------------+
+| update()       |
++----------------+
 
-Features
++----------------+
+| FeatureEngine  |
++----------------+
+| config         |
+| atrCalc        |
++----------------+
+| update()       |
++----------------+
 
-ATR Volatility
++----------------+
+| FeatureConfig  |
++----------------+
+| useATR         |
+| useRegime      |
+| atrPeriod      |
++----------------+
 
-Measures market movement intensity.
-
-Market Regime Detection
-
-Classifies market as:
-
-TRENDING
-
-RANGING
-
-
-Trend Strength Formula
-
-TrendStrength = \frac{|MA_{fast} - MA_{slow}|}{Price}
-
-Regime Logic
-
-Market is trending when:
-
-MA separation exceeds threshold
-
-ATR exceeds minimum volatility
-
-
-
----
-
-4.6 Signal Engine
-
-Responsibility
-
-Determines trading decisions.
-
-Entry Conditions
-
-Long entry occurs when:
-
-Fast MA > Slow MA
-
-Positive momentum
-
-Regime = TRENDING
-
-Cooldown expired
-
-No existing position
-
-
-Exit Conditions
-
-Exit occurs when:
-
-ATR stop-loss hit
-
-ATR take-profit hit
-
-Trend reversal detected
-
++----------------+
+| FeatureState   |
++----------------+
+| atr            |
+| regime         |
++----------------+
 
 
 ---
 
-4.7 Risk Management Engine
+13. Performance Analysis
 
-Responsibility
-
-Controls exposure and account safety.
-
-Features
-
-Position Sizing
-
-Volatility-adjusted sizing:
-
-PositionSize = \frac{RiskAmount}{StopDistance}
-
-Maximum Drawdown Protection
-
-Trading halts if:
-
-Drawdown = \frac{MaxEquity - Equity}{MaxEquity}
-
-exceeds configured threshold.
-
-Cooldown Protection
-
-Prevents excessive trading frequency.
-
-
----
-
-4.8 Execution Simulator
-
-Responsibility
-
-Simulates trade execution.
-
-Current Capabilities
-
-Buy execution
-
-Sell execution
-
-Equity updates
-
-Cash management
-
-
-Limitations
-
-No simulation of:
-
-Slippage
-
-Partial fills
-
-Spread
-
-Market impact
-
-Latency
-
-
-
----
-
-4.9 Portfolio Tracker
-
-Responsibility
-
-Tracks:
-
-Cash balance
-
-Open positions
-
-Equity
-
-Peak equity
-
-
-Equity Formula
-
-Equity = Cash + Shares \times Price
-
-
----
-
-5. Data Flow
-
-Market API
-    |
-    v
-Price Fetch
-    |
-    v
-Indicator Update
-    |
-    v
-Feature Computation
-    |
-    v
-Signal Generation
-    |
-    v
-Risk Validation
-    |
-    v
-Trade Execution
-    |
-    v
-Portfolio Update
-
-
----
-
-6. State Management
-
-Current State Variables
-
-Variable	Purpose
-
-cash	Available capital
-shares	Current position size
-entry	Entry price
-maxEquity	Peak portfolio value
-prevPrice	Previous market price
-
-
-
----
-
-7. Configuration Management
-
-Configurable Parameters
-
-Parameter	Purpose
-
-SMA periods	Trend sensitivity
-ATR period	Volatility smoothing
-Risk per trade	Capital exposure
-Max drawdown	Portfolio protection
-Cooldown time	Trading frequency
-Trend threshold	Regime classification
-
-
-
----
-
-8. Error Handling
-
-Current Handling
-
-Retry on failed requests
-
-Ignore invalid prices
-
-Basic null checking
-
-
-Missing Handling
-
-Network exceptions
-
-API schema changes
-
-Invalid JSON
-
-Clock synchronization
-
-Rate limiting
-
-
-
----
-
-9. Performance Characteristics
-
-Metric	Value
+Operation	Complexity
 
 SMA Update	O(1)
 ATR Update	O(1)
-Memory Usage	Low
-Network Usage	Moderate
-Scalability	Single-symbol
+Momentum	O(1)
+Signal Eval	O(1)
 
 
+Memory usage:
 
----
-
-10. Known Limitations
-
-Trading Limitations
-
-Single asset only
-
-Long-only strategy
-
-No leverage
-
-No short selling
-
-
-Market Data Limitations
-
-No candles
-
-No order book
-
-No volume data
-
-
-Execution Limitations
-
-No slippage
-
-No commissions
-
-No realistic latency
-
-
-Architecture Limitations
-
-Blocking main loop
-
-No threading model
-
-No persistence
-
-No database integration
-
+O(window_size)
 
 
 ---
 
-11. Security Considerations
+14. Security Concerns
 
 Current Risks
 
-Shell execution via popen()
+Shell execution vulnerability
 
-No API authentication
+External API dependency
 
-No input sanitization
+No authentication
 
-
-Recommended Improvements
-
-Use secure HTTP libraries
-
-Add API credential management
-
-Remove shell-based execution
+No rate-limit handling
 
 
 
 ---
 
-12. Future Enhancements
+15. Future Production Architecture
 
-Short-Term
-
-Proper JSON parsing
-
-OHLC candle support
-
-CSV trade logging
-
-Historical backtesting
-
-
-Medium-Term
-
-Multi-symbol trading
-
-Event-driven architecture
-
-Websocket feeds
-
-Real broker integration
-
-
-Long-Term
-
-Portfolio optimization
-
-Machine learning models
-
-Distributed execution
-
-Strategy orchestration
-
+Market Feed
+    ↓
+Event Queue
+    ↓
+Feature Engine
+    ↓
+Signal Engine
+    ↓
+Risk Engine
+    ↓
+OMS (Order Management)
+    ↓
+Broker API
 
 
 ---
 
-13. Suggested Production Architecture
+16. Conclusion
 
-+-------------------+
-                | Market Data Feed  |
-                +-------------------+
-                          |
-                          v
-                +-------------------+
-                | Event Bus         |
-                +-------------------+
-                   |     |      |
-                   v     v      v
-             Indicators Features Signals
-                   |     |      |
-                   +-----+------+
-                          |
-                          v
-                +-------------------+
-                | Risk Engine       |
-                +-------------------+
-                          |
-                          v
-                +-------------------+
-                | Execution Engine  |
-                +-------------------+
-                          |
-                          v
-                +-------------------+
-                | Broker API        |
-                +-------------------+
+This design provides:
 
+Modular trading architecture
 
----
+Efficient rolling indicators
 
-14. Conclusion
-
-The current implementation is a strong educational prototype demonstrating:
-
-Modular trading system design
-
-Incremental indicator computation
-
-Basic quantitative risk management
+Volatility-aware risk management
 
 Market regime filtering
 
-ATR-based position sizing
+Real-time trade simulation
 
 
-However, it is not yet suitable for production trading due to:
+The system is suitable for:
 
-Simplified volatility estimation
+Quant strategy prototyping
 
-Lack of realistic execution modeling
+Learning algorithmic trading
 
-Weak data reliability
+Backtesting framework foundations
 
-Absence of robust infrastructure
-
-
-The architecture provides a strong foundation for future evolution into a more sophisticated algorithmic trading platform.
+Extending toward production-grade systems
