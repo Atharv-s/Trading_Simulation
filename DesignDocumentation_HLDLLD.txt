@@ -1,0 +1,877 @@
+Low Level Design (LLD)
+
+Live Trading Simulation System (ATR + Market Regime Engine)
+
+
+---
+
+1. Overview
+
+The system is a lightweight real-time trading simulator written in C++.
+It continuously fetches market prices from Yahoo Finance, computes technical indicators, classifies market conditions, generates trading signals, and simulates trade execution with risk management.
+
+The architecture is modular and composed of:
+
+Market Data Layer
+
+Indicator Engine
+
+Feature Engine
+
+Signal Engine
+
+Risk Management
+
+Trade Execution Simulator
+
+Portfolio Tracking
+
+
+
+---
+
+2. System Goals
+
+Functional Goals
+
+Fetch live market price data
+
+Compute SMA indicators
+
+Compute ATR-based volatility
+
+Detect market regime
+
+Generate buy/sell signals
+
+Simulate order execution
+
+Apply risk management
+
+Track portfolio equity
+
+
+Non-Functional Goals
+
+Low memory footprint
+
+O(1) indicator updates
+
+Modular architecture
+
+Easy feature extension
+
+Real-time loop execution
+
+
+
+---
+
+3. High-Level Architecture
+
++----------------------+
+| Yahoo Finance API    |
++----------+-----------+
+           |
+           v
++----------------------+
+| Market Data Fetcher  |
++----------+-----------+
+           |
+           v
++----------------------+
+| Indicator Engine     |
+| - SMA                |
+| - ATR                |
+| - Momentum           |
++----------+-----------+
+           |
+           v
++----------------------+
+| Feature Engine       |
+| - Volatility         |
+| - Market Regime      |
++----------+-----------+
+           |
+           v
++----------------------+
+| Signal Generator     |
+| - Trend Logic        |
+| - Momentum Logic     |
++----------+-----------+
+           |
+           v
++----------------------+
+| Risk Manager         |
+| - Position Sizing    |
+| - Drawdown Control   |
++----------+-----------+
+           |
+           v
++----------------------+
+| Trade Executor       |
++----------+-----------+
+           |
+           v
++----------------------+
+| Portfolio State      |
++----------------------+
+
+
+---
+
+4. Module Design
+
+
+---
+
+4.1 Utility Module
+
+Responsibility
+
+Provides helper utilities for:
+
+Shell command execution
+
+API calls
+
+JSON field extraction
+
+
+
+---
+
+Functions
+
+exec()
+
+Purpose
+
+Executes shell command using popen().
+
+Signature
+
+string exec(const string& cmd);
+
+Input
+
+Parameter	Type	Description
+
+cmd	string	Shell command
+
+
+Output
+
+Type	Description
+
+string	Command stdout
+
+
+
+---
+
+extractValue()
+
+Purpose
+
+Extract numeric field from JSON string.
+
+Signature
+
+double extractValue(
+    const string& response,
+    const string& key
+);
+
+
+---
+
+extractPrice()
+
+Purpose
+
+Extract Yahoo Finance market price.
+
+Signature
+
+double extractPrice(const string& response);
+
+
+---
+
+getResponse()
+
+Purpose
+
+Fetch API response using curl.
+
+Signature
+
+double getResponse(
+    const string& symbol,
+    string& response
+);
+
+
+---
+
+4.2 Rolling SMA Module
+
+Class
+
+class RollingSMA
+
+
+---
+
+Responsibility
+
+Efficient moving average computation using:
+
+rolling window
+
+rolling sum
+
+
+Complexity:
+
+Time  : O(1)
+Memory: O(period)
+
+
+---
+
+Attributes
+
+Variable	Type	Purpose
+
+period	int	SMA period
+sum	double	Running sum
+window	deque<double>	Price window
+
+
+
+---
+
+Methods
+
+Constructor
+
+RollingSMA(int p);
+
+
+---
+
+update()
+
+Purpose
+
+Adds new value and computes SMA.
+
+Signature
+
+double update(double val);
+
+Returns
+
+Condition	Return
+
+Not initialized	0.0
+Initialized	SMA value
+
+
+
+---
+
+4.3 ATR Module
+
+Class
+
+class ATR
+
+
+---
+
+Responsibility
+
+Computes Average True Range (ATR) using Wilder smoothing.
+
+
+---
+
+Attributes
+
+Variable	Type	Description
+
+period	int	ATR period
+atr	double	Current ATR
+count	int	Warmup counter
+initialized	bool	ATR ready state
+
+
+
+---
+
+Methods
+
+Constructor
+
+ATR(int p);
+
+
+---
+
+update()
+
+Signature
+
+double update(
+    double high,
+    double low,
+    double prevClose
+);
+
+
+---
+
+Formula
+
+True Range
+
+TR = \max\left( high-low, |high-prevClose|, |low-prevClose| \right)
+
+Wilder ATR
+
+ATR_t = \frac{ATR_{t-1}(n-1)+TR_t}{n}
+
+
+---
+
+4.4 Feature Engine
+
+Class
+
+class FeatureEngine
+
+
+---
+
+Responsibility
+
+Computes:
+
+Volatility
+
+Market regime
+
+
+
+---
+
+Supporting Structures
+
+FeatureConfig
+
+Stores configuration flags.
+
+Variable	Type
+
+useATR	bool
+useRegime	bool
+atrPeriod	int
+minTrendStrength	double
+minATR	double
+
+
+
+---
+
+FeatureState
+
+Stores runtime feature values.
+
+Variable	Type
+
+atr	double
+regime	MarketRegime
+
+
+
+---
+
+Methods
+
+Constructor
+
+FeatureEngine(const FeatureConfig& cfg);
+
+
+---
+
+update()
+
+Signature
+
+FeatureState update(
+    double prevPrice,
+    double price,
+    double fastMA,
+    double slowMA
+);
+
+
+---
+
+Regime Formula
+
+TrendStrength = \frac{|FastMA - SlowMA|}{Price}
+
+
+---
+
+Regime Logic
+
+TRENDING:
+    trendStrength > minTrendStrength
+    AND
+    ATR > minATR
+
+RANGING:
+    otherwise
+
+
+---
+
+4.5 Momentum Module
+
+Function
+
+double momentum(
+    const deque<double>& data,
+    int lookback
+);
+
+
+---
+
+Responsibility
+
+Computes rate-of-change momentum.
+
+
+---
+
+Formula
+
+Momentum = \frac{CurrentPrice - PastPrice}{PastPrice}
+
+
+---
+
+4.6 Risk Management Module
+
+Responsibility
+
+Controls:
+
+Position sizing
+
+Drawdown protection
+
+ATR stop sizing
+
+
+
+---
+
+Risk Parameters
+
+Parameter	Value
+
+Risk Per Trade	1%
+Max Drawdown	10%
+Stop Multiplier	2 × ATR
+Target Multiplier	4 × ATR
+
+
+
+---
+
+Position Sizing Formula
+
+PositionSize = \frac{RiskAmount}{StopDistance}
+
+Where:
+
+RiskAmount = Equity × RiskPerTrade
+StopDistance = ATR × 2
+
+
+---
+
+4.7 Trade Execution Engine
+
+Responsibility
+
+Simulates order execution.
+
+
+---
+
+Entry Conditions
+
+BUY if:
+    - No active position
+    - Cooldown passed
+    - FastMA > SlowMA
+    - Momentum positive
+    - Market regime = TRENDING
+
+
+---
+
+Exit Conditions
+
+SELL if:
+    - Price <= stop loss
+    OR
+    - Price >= take profit
+    OR
+    - FastMA < SlowMA
+
+
+---
+
+5. State Management
+
+
+---
+
+Portfolio State
+
+Variable	Description
+
+cash	Available cash
+shares	Open position size
+entry	Entry price
+equity	Current account value
+maxEquity	Peak equity
+
+
+
+---
+
+Market State
+
+Variable	Description
+
+prevPrice	Previous market price
+prices	Historical rolling prices
+tick	Loop iteration counter
+
+
+
+---
+
+6. Sequence Flow
+
+START
+   |
+   v
+Fetch Market Data
+   |
+   v
+Extract Price
+   |
+   v
+Update Indicators
+   |
+   v
+Update Features
+   |
+   v
+Compute Equity
+   |
+   v
+Check Drawdown
+   |
+   v
+Generate Signals
+   |
+   v
+Execute Trades
+   |
+   v
+Update Portfolio
+   |
+   v
+Log Status
+   |
+   v
+Sleep 5 Seconds
+   |
+   +----> Repeat
+
+
+---
+
+7. Data Structures Used
+
+Structure	Usage
+
+deque<double>	Rolling windows
+array<char,256>	Command buffer
+unique_ptr	RAII pipe management
+enum	Market regime
+
+
+
+---
+
+8. Threading Model
+
+Current implementation:
+
+Single-threaded polling loop
+
+Potential enhancements:
+
+Async market feed
+
+Parallel indicator computation
+
+Event-driven architecture
+
+
+
+---
+
+9. Error Handling
+
+Scenario	Handling
+
+API timeout	Retry
+Empty response	Ignore tick
+Invalid price	Skip iteration
+ATR not initialized	No trade
+Drawdown exceeded	Stop system
+
+
+
+---
+
+10. Limitations
+
+Current Limitations
+
+Market Data
+
+Uses polling instead of websocket
+
+No OHLC candles
+
+ATR approximation only
+
+
+Parsing
+
+Manual JSON parsing is fragile
+
+
+Execution
+
+No slippage
+
+No commissions
+
+No order book simulation
+
+
+Strategy
+
+Single-symbol only
+
+Long-only strategy
+
+
+
+---
+
+11. Suggested Improvements
+
+Data Layer
+
+Replace curl + popen
+
+Use REST/WebSocket client
+
+Add real JSON parser
+
+
+Recommended:
+
+libcurl
+
+Boost.Beast
+
+nlohmann/json
+
+
+
+---
+
+Strategy Layer
+
+Add:
+
+RSI
+
+MACD
+
+Multi-timeframe confirmation
+
+Volume analysis
+
+
+
+---
+
+Risk Engine
+
+Add:
+
+Trailing stops
+
+Dynamic leverage
+
+Portfolio diversification
+
+
+
+---
+
+12. Class Diagram
+
++----------------+
+| RollingSMA     |
++----------------+
+| period         |
+| sum            |
+| window         |
++----------------+
+| update()       |
++----------------+
+
++----------------+
+| ATR            |
++----------------+
+| period         |
+| atr            |
+| initialized    |
++----------------+
+| update()       |
++----------------+
+
++----------------+
+| FeatureEngine  |
++----------------+
+| config         |
+| atrCalc        |
++----------------+
+| update()       |
++----------------+
+
++----------------+
+| FeatureConfig  |
++----------------+
+| useATR         |
+| useRegime      |
+| atrPeriod      |
++----------------+
+
++----------------+
+| FeatureState   |
++----------------+
+| atr            |
+| regime         |
++----------------+
+
+
+---
+
+13. Performance Analysis
+
+Operation	Complexity
+
+SMA Update	O(1)
+ATR Update	O(1)
+Momentum	O(1)
+Signal Eval	O(1)
+
+
+Memory usage:
+
+O(window_size)
+
+
+---
+
+14. Security Concerns
+
+Current Risks
+
+Shell execution vulnerability
+
+External API dependency
+
+No authentication
+
+No rate-limit handling
+
+
+
+---
+
+15. Future Production Architecture
+
+Market Feed
+    ↓
+Event Queue
+    ↓
+Feature Engine
+    ↓
+Signal Engine
+    ↓
+Risk Engine
+    ↓
+OMS (Order Management)
+    ↓
+Broker API
+
+
+---
+
+16. Conclusion
+
+This design provides:
+
+Modular trading architecture
+
+Efficient rolling indicators
+
+Volatility-aware risk management
+
+Market regime filtering
+
+Real-time trade simulation
+
+
+The system is suitable for:
+
+Quant strategy prototyping
+
+Learning algorithmic trading
+
+Backtesting framework foundations
+
+Extending toward production-grade systems
