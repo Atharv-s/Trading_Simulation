@@ -1,758 +1,579 @@
-#include <iostream>      // Console I/O
-#include <string>        // std::string
-#include <cstdio>        // popen, pclose
-#include <memory>        // std::unique_ptr
-#include <thread>        // sleep_for
-#include <chrono>        // timing utilities
-#include <array>         // fixed-size buffer
-#include <deque>         // rolling windows
-#include <algorithm>     // max, min
+#include <iostream>
+#include <string>
+#include <cstdio>
+#include <memory>
+#include <thread>
+#include <chrono>
+#include <array>
+#include <deque>
+#include <vector>
+#include <algorithm>
+#include <numeric>
+#include <cmath>
+#include <sstream>
+#include <iomanip>
+#include <atomic>
+#include <csignal>
 
 using namespace std;
+using namespace chrono;
+
+//====================================================//
+//                  SIGNAL HANDLER                    //
+//====================================================//
+
+atomic<bool> running{true};
+
+void onSignal(int) {
+    running = false;
+    cout << "\n[SHUTDOWN] Gracefully stopping...\n";
+}
 
 //====================================================//
 //                    UTILITIES                       //
 //====================================================//
 
-/*
-    Executes a shell command and returns stdout output.
-
-    Used here to call:
-        curl -> Yahoo Finance API
-
-    WARNING:
-    - popen() is platform-dependent
-    - shell execution is slow
-    - unsafe for production trading systems
-*/
 string exec(const string& cmd) {
-    array<char, 256> buffer;
+    array<char, 512> buffer;
     string result;
-
-    // RAII wrapper for pipe cleanup
     unique_ptr<FILE, decltype(&pclose)>
         pipe(popen(cmd.c_str(), "r"), pclose);
-
-    if (!pipe)
-        return "";
-
-    // Read command output
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+    if (!pipe) return "";
+    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr)
         result += buffer.data();
-    }
-
     return result;
 }
 
-/*
-    Extracts a numeric value from raw JSON text.
-
-    Example:
-        key = "\"regularMarketPrice\":"
-
-    Searches for:
-        "regularMarketPrice":123.45
-
-    RETURNS:
-        Parsed double value
-        or -1 if parsing fails
-
-    NOTE:
-    This is fragile and should ideally use
-    a proper JSON parser.
-*/
-double extractValue(const string& response, const string& key) {
-    size_t pos = response.find(key);
-
-    if (pos == string::npos)
-        return -1;
-
+// More robust: tries multiple JSON key variants
+double extractValue(const string& json, const string& key) {
+    size_t pos = json.find(key);
+    if (pos == string::npos) return -1.0;
     pos += key.length();
-
-    char* endPtr;
-
-    // Convert substring -> double
-    double val = strtod(response.c_str() + pos, &endPtr);
-
-    return (endPtr == response.c_str() + pos)
-        ? -1
-        : val;
+    // Skip whitespace/colon if needed
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == ':'))
+        pos++;
+    char* end;
+    double val = strtod(json.c_str() + pos, &end);
+    return (end == json.c_str() + pos) ? -1.0 : val;
 }
 
-/*
-    Extracts market price from Yahoo Finance response.
-*/
-double extractPrice(const string& response) {
-    return extractValue(response, "\"regularMarketPrice\":");
-}
+double extractPrice(const string& r)     { return extractValue(r, "\"regularMarketPrice\":"); }
+double extractVolume(const string& r)    { return extractValue(r, "\"regularMarketVolume\":"); }
+double extractDayHigh(const string& r)   { return extractValue(r, "\"regularMarketDayHigh\":"); }
+double extractDayLow(const string& r)    { return extractValue(r, "\"regularMarketDayLow\":"); }
+double extractPrevClose(const string& r) { return extractValue(r, "\"regularMarketPreviousClose\":"); }
 
-/*
-    Downloads market data for a symbol.
+struct Tick {
+    double price     = 0;
+    double volume    = 0;
+    double dayHigh   = 0;
+    double dayLow    = 0;
+    double prevClose = 0;
+    steady_clock::time_point ts;
+};
 
-    Example API:
-    https://query1.finance.yahoo.com/v7/finance/quote?symbols=AMZN
-
-    RETURNS:
-        0 on success
-       -1 on failure
-*/
-double getResponse(const string& symbol, string& response) {
-
+// Fetch + parse into Tick in one call
+bool fetchTick(const string& symbol, Tick& out) {
     static const string base =
-        "curl -s --connect-timeout 2 "
+        "curl -s --connect-timeout 3 --max-time 5 "
+        "-H \"User-Agent: Mozilla/5.0\" "
         "\"https://query1.finance.yahoo.com/v7/finance/quote?symbols=";
 
-    response = exec(base + symbol + "\"");
+    string response = exec(base + symbol + "\"");
+    if (response.empty()) return false;
 
-    return response.empty() ? -1 : 0;
+    double p = extractPrice(response);
+    if (p <= 0) return false;
+
+    out.price     = p;
+    out.volume    = extractVolume(response);
+    out.dayHigh   = extractDayHigh(response);
+    out.dayLow    = extractDayLow(response);
+    out.prevClose = extractPrevClose(response);
+    out.ts        = steady_clock::now();
+    return true;
 }
 
 //====================================================//
-//                SIMPLE MOVING AVERAGE               //
+//                  ROLLING INDICATORS                //
 //====================================================//
 
-/*
-    Rolling SMA implementation.
-
-    Maintains:
-    - rolling window
-    - rolling sum
-
-    Complexity:
-        O(1) per update
-*/
-class RollingSMA {
-    int period;
-
-    double sum = 0.0;
-
-    deque<double> window;
-
+// Generic rolling window helper
+class RollingWindow {
+    int cap;
+    deque<double> buf;
+    double sum_ = 0;
 public:
-    RollingSMA(int p) : period(p) {}
+    RollingWindow(int n) : cap(n) {}
 
-    /*
-        Adds new value to SMA.
-
-        RETURNS:
-            SMA if fully initialized
-            0 otherwise
-    */
-    double update(double val) {
-
-        window.push_back(val);
-
-        sum += val;
-
-        // Remove oldest element if window exceeded
-        if (window.size() > period) {
-            sum -= window.front();
-            window.pop_front();
-        }
-
-        // Only valid once fully initialized
-        return (window.size() == period)
-            ? sum / period
-            : 0.0;
+    void push(double v) {
+        buf.push_back(v);
+        sum_ += v;
+        if ((int)buf.size() > cap) { sum_ -= buf.front(); buf.pop_front(); }
     }
+
+    bool ready()          const { return (int)buf.size() == cap; }
+    int  size()           const { return (int)buf.size(); }
+    double sum()          const { return sum_; }
+    double mean()         const { return ready() ? sum_ / cap : 0.0; }
+    const deque<double>& data() const { return buf; }
+
+    double stdev() const {
+        if (!ready()) return 0.0;
+        double m = mean();
+        double var = 0;
+        for (double v : buf) var += (v - m) * (v - m);
+        return sqrt(var / cap);
+    }
+
+    double back()  const { return buf.empty() ? 0 : buf.back(); }
+    double front() const { return buf.empty() ? 0 : buf.front(); }
 };
 
-//====================================================//
-//               AVERAGE TRUE RANGE (ATR)             //
-//====================================================//
+//----------------------------------------------------//
+// EMA (Exponential Moving Average)
+//----------------------------------------------------//
+class EMA {
+    int period;
+    double alpha;
+    double val = 0;
+    bool ready_ = false;
+    int count = 0;
+    double warmup = 0;
+public:
+    EMA(int p) : period(p), alpha(2.0 / (p + 1)) {}
 
-/*
-    ATR = volatility indicator
+    double update(double v) {
+        if (!ready_) {
+            warmup += v;
+            count++;
+            if (count == period) {
+                val = warmup / period;
+                ready_ = true;
+            }
+            return 0.0;
+        }
+        val = alpha * v + (1 - alpha) * val;
+        return val;
+    }
 
-    Measures:
-    - market movement magnitude
-    - stop-loss sizing
-    - volatility-adjusted risk
+    bool ready() const { return ready_; }
+    double get() const { return val; }
+};
 
-    IMPORTANT:
-    Since this bot only has price data (not OHLC),
-    ATR here is only an approximation.
-*/
+//----------------------------------------------------//
+// RSI (Relative Strength Index)
+//----------------------------------------------------//
+class RSI {
+    int period;
+    double avgGain = 0, avgLoss = 0;
+    double prevPrice = -1;
+    int count = 0;
+    bool ready_ = false;
+public:
+    RSI(int p = 14) : period(p) {}
+
+    double update(double price) {
+        if (prevPrice < 0) { prevPrice = price; return 50.0; }
+
+        double change = price - prevPrice;
+        double gain = max(change, 0.0);
+        double loss = max(-change, 0.0);
+        prevPrice = price;
+
+        if (!ready_) {
+            avgGain = (avgGain * count + gain) / (count + 1);
+            avgLoss = (avgLoss * count + loss) / (count + 1);
+            count++;
+            if (count >= period) ready_ = true;
+        } else {
+            // Wilder smoothing
+            avgGain = (avgGain * (period - 1) + gain) / period;
+            avgLoss = (avgLoss * (period - 1) + loss) / period;
+        }
+
+        if (avgLoss == 0) return 100.0;
+        double rs = avgGain / avgLoss;
+        return 100.0 - (100.0 / (1.0 + rs));
+    }
+
+    bool ready() const { return ready_; }
+};
+
+//----------------------------------------------------//
+// Bollinger Bands
+//----------------------------------------------------//
+struct BBands {
+    double upper, mid, lower, bandwidth, pctB;
+};
+
+BBands bollingerBands(const RollingWindow& w, double kMult = 2.0) {
+    double mid   = w.mean();
+    double sd    = w.stdev();
+    double upper = mid + kMult * sd;
+    double lower = mid - kMult * sd;
+    double bw    = (mid > 0) ? (upper - lower) / mid : 0;
+    double price = w.back();
+    double pctB  = (upper != lower) ? (price - lower) / (upper - lower) : 0.5;
+    return {upper, mid, lower, bw, pctB};
+}
+
+//----------------------------------------------------//
+// ATR (Average True Range) — uses real OHLC when available
+//----------------------------------------------------//
 class ATR {
     int period;
-
-    double atr = 0.0;
-
+    double atr = 0;
     int count = 0;
-
-    bool initialized = false;
-
+    bool ready_ = false;
 public:
-    ATR(int p) : period(p) {}
+    ATR(int p = 14) : period(p) {}
 
-    /*
-        Updates ATR value.
-
-        Normally ATR uses:
-            high
-            low
-            previous close
-
-        Here:
-            high == low == price
-        so ATR approximates tick volatility.
-    */
-    double update(double high,
-                  double low,
-                  double prevClose) {
-
-        // True Range calculation
-        double tr = max({
-            high - low,
-            abs(high - prevClose),
-            abs(low - prevClose)
-        });
-
-        // Warmup period
-        if (!initialized) {
-
-            atr += tr;
-
+    double update(double high, double low, double prevClose) {
+        double tr = max({high - low,
+                         abs(high - prevClose),
+                         abs(low  - prevClose)});
+        if (!ready_) {
+            atr = (atr * count + tr) / (count + 1);
             count++;
-
-            // Initialize ATR after full period
-            if (count == period) {
-                atr /= period;
-                initialized = true;
-            }
-
-            return atr;
+            if (count >= period) ready_ = true;
+        } else {
+            atr = (atr * (period - 1) + tr) / period;
         }
-
-        // Wilder smoothing formula
-        atr = (atr * (period - 1) + tr) / period;
-
         return atr;
     }
+
+    double get()  const { return atr; }
+    bool ready()  const { return ready_; }
 };
 
 //====================================================//
-//                 MARKET REGIME TYPES                //
+//               VOLUME ANALYSIS                      //
 //====================================================//
 
-/*
-    Market state classification.
-
-    TRENDING:
-        directional movement
-
-    RANGING:
-        sideways/choppy market
-*/
-enum MarketRegime {
-    TRENDING,
-    RANGING
-};
-
-//====================================================//
-//                  FEATURE CONFIG                    //
-//====================================================//
-
-/*
-    Strategy feature toggles and thresholds.
-*/
-struct FeatureConfig {
-
-    // Enable ATR filter
-    bool useATR = true;
-
-    // Enable regime detection
-    bool useRegime = true;
-
-    // ATR calculation period
-    int atrPeriod = 14;
-
-    /*
-        Minimum MA separation required
-        to classify as trending.
-    */
-    double minTrendStrength = 0.002;
-
-    /*
-        Minimum volatility threshold.
-    */
-    double minATR = 0.001;
-};
-
-//====================================================//
-//                 FEATURE OUTPUT STATE               //
-//====================================================//
-
-struct FeatureState {
-
-    // Current ATR value
-    double atr = 0.0;
-
-    // Current market regime
-    MarketRegime regime = RANGING;
-};
-
-//====================================================//
-//                  FEATURE ENGINE                    //
-//====================================================//
-
-/*
-    Computes:
-    - volatility
-    - market regime
-
-    Keeps strategy logic modular.
-*/
-class FeatureEngine {
-
-    FeatureConfig config;
-
-    ATR atrCalc;
-
-public:
-    FeatureEngine(const FeatureConfig& cfg)
-        : config(cfg),
-          atrCalc(cfg.atrPeriod) {}
-
-    /*
-        Updates all features from latest market data.
-    */
-    FeatureState update(double prevPrice,
-                        double price,
-                        double fastMA,
-                        double slowMA) {
-
-        FeatureState state;
-
-        //------------------------------------------------//
-        // ATR CALCULATION
-        //------------------------------------------------//
-
-        if (config.useATR && prevPrice > 0) {
-
-            // Since no OHLC available:
-            // approximate using current price
-            double high = price;
-            double low = price;
-
-            state.atr =
-                atrCalc.update(high, low, prevPrice);
-        }
-
-        //------------------------------------------------//
-        // REGIME DETECTION
-        //------------------------------------------------//
-
-        if (config.useRegime) {
-
-            /*
-                Trend strength:
-                MA separation normalized by price
-            */
-            double trendStrength =
-                abs(fastMA - slowMA) / price;
-
-            /*
-                Market considered trending if:
-                - MA separation is meaningful
-                - volatility exceeds threshold
-            */
-            bool trending =
-                trendStrength > config.minTrendStrength &&
-                state.atr > config.minATR;
-
-            state.regime =
-                trending ? TRENDING : RANGING;
-        }
-
-        return state;
-    }
-
-    const FeatureConfig& getConfig() const {
-        return config;
-    }
-};
-
-//====================================================//
-//                    MOMENTUM                        //
-//====================================================//
-
-/*
-    Simple rate-of-change momentum.
-
-    Formula:
-        (current - past) / past
-
-    Positive:
-        bullish momentum
-
-    Negative:
-        bearish momentum
-*/
-double momentum(const deque<double>& data,
-                int lookback) {
-
-    if (data.size() < lookback + 1)
-        return 0.0;
-
-    return (data.back() -
-            data[data.size() - 1 - lookback])
-           /
-           data[data.size() - 1 - lookback];
+// Detect if current volume is above its rolling average
+bool isVolumeSpike(const RollingWindow& volWindow, double currentVol, double mult = 1.5) {
+    if (!volWindow.ready()) return false;
+    return currentVol > volWindow.mean() * mult;
 }
 
 //====================================================//
-//                       MAIN                         //
+//              SIGNAL SCORING ENGINE                 //
 //====================================================//
 
-int main() {
+/*
+    Confluent signal approach:
+    Multiple conditions vote; trade only on strong consensus.
+    Score range: -4 (strong sell) to +4 (strong buy)
+*/
+struct SignalScore {
+    int score = 0;           // composite vote
+    string reasons;          // human-readable explanation
+
+    void add(int vote, const string& label) {
+        score += vote;
+        reasons += (vote > 0 ? "[+" : "[") + to_string(vote) + " " + label + "] ";
+    }
+};
+
+SignalScore computeSignal(
+    double price,
+    double fastEMA, double slowEMA,
+    double rsi,
+    const BBands& bb,
+    double atr,
+    double volume, const RollingWindow& volWin,
+    double prevPrice
+) {
+    SignalScore sig;
+
+    // 1. EMA crossover trend
+    if (fastEMA > 0 && slowEMA > 0) {
+        double gap = (fastEMA - slowEMA) / price;
+        if (gap > 0.001)       sig.add(+1, "EMA_bull");
+        else if (gap < -0.001) sig.add(-1, "EMA_bear");
+    }
+
+    // 2. RSI — overbought/oversold
+    if (rsi < 30)      sig.add(+1, "RSI_oversold");
+    else if (rsi > 70) sig.add(-1, "RSI_overbought");
+    else if (rsi > 55) sig.add(+1, "RSI_bullish");
+    else if (rsi < 45) sig.add(-1, "RSI_bearish");
+
+    // 3. Bollinger %B
+    if (bb.pctB < 0.1)      sig.add(+1, "BB_oversold");
+    else if (bb.pctB > 0.9) sig.add(-1, "BB_overbought");
+    else if (bb.pctB > 0.6) sig.add(+1, "BB_upper_zone");
+    else if (bb.pctB < 0.4) sig.add(-1, "BB_lower_zone");
+
+    // 4. Momentum (simple price change vs ATR)
+    if (atr > 0 && prevPrice > 0) {
+        double chg = (price - prevPrice) / atr;
+        if (chg > 0.3)       sig.add(+1, "MOM_up");
+        else if (chg < -0.3) sig.add(-1, "MOM_down");
+    }
+
+    return sig;
+}
+
+//====================================================//
+//                 POSITION MANAGER                   //
+//====================================================//
+
+struct Position {
+    double shares   = 0;
+    double entry    = 0;
+    double stopLoss = 0;
+    double takeProfit = 0;
+};
+
+//====================================================//
+//                   TRADE LOG                        //
+//====================================================//
+
+struct Trade {
+    string type;       // BUY / SELL
+    double price;
+    double shares;
+    double pnl;
+    string time;
+};
+
+string nowStr() {
+    auto t  = system_clock::to_time_t(system_clock::now());
+    char buf[20];
+    strftime(buf, sizeof(buf), "%H:%M:%S", localtime(&t));
+    return buf;
+}
+
+//====================================================//
+//                   MAIN BOT                         //
+//====================================================//
+
+int main(int argc, char* argv[]) {
+
+    signal(SIGINT, onSignal);
+    signal(SIGTERM, onSignal);
 
     //------------------------------------------------//
-    // MARKET CONFIGURATION
+    // CONFIG (easily tunable)
     //------------------------------------------------//
-
-    const string symbol = "AMZN";
-
-    //------------------------------------------------//
-    // ACCOUNT STATE
-    //------------------------------------------------//
-
-    double cash = 10000.0;
-
-    // Number of shares currently held
-    double shares = 0.0;
-
-    // Entry price of current position
-    double entry = 0.0;
-
-    // Track peak equity for drawdown protection
-    double maxEquity = cash;
-
-    //------------------------------------------------//
-    // RISK PARAMETERS
-    //------------------------------------------------//
-
-    // Risk 1% of account per trade
-    const double riskPerTrade = 0.01;
-
-    // Stop trading after 10% drawdown
-    const double maxDrawdown = 0.10;
-
-    // Cooldown between trades
-    const int cooldownSec = 10;
+    const string symbol       = (argc > 1) ? argv[1] : "AMZN";
+    const double startCash    = 10000.0;
+    const double riskPerTrade = 0.01;      // 1% account risk per trade
+    const double maxDrawdown  = 0.10;      // halt at 10% drawdown
+    const int    pollSec      = 5;         // fetch interval (seconds)
+    const int    cooldownSec  = 15;        // min seconds between trades
+    const int    minBuyScore  = 2;         // need 2+ bullish votes to buy
+    const int    minSellScore = -2;        // need -2 or less to exit
 
     //------------------------------------------------//
     // INDICATORS
     //------------------------------------------------//
-
-    RollingSMA fastMA(5);
-
-    RollingSMA slowMA(20);
-
-    //------------------------------------------------//
-    // FEATURE ENGINE
-    //------------------------------------------------//
-
-    FeatureConfig config;
-
-    FeatureEngine features(config);
+    EMA           fastEMA(9);
+    EMA           slowEMA(21);
+    RSI           rsi14(14);
+    RollingWindow bbWindow(20);
+    RollingWindow volWindow(20);
+    ATR           atr14(14);
 
     //------------------------------------------------//
-    // PRICE STORAGE
+    // STATE
     //------------------------------------------------//
+    double cash       = startCash;
+    double maxEquity  = startCash;
+    Position pos;
+    vector<Trade> trades;
 
-    deque<double> prices;
+    double prevPrice  = 0;
+    int    tick       = 0;
+    auto   lastTrade  = steady_clock::now() - seconds(cooldownSec + 1);
 
-    double prevPrice = 0.0;
-
-    auto lastTradeTime =
-        chrono::steady_clock::now();
-
-    cout << "=== LIVE TRADING SIM (ATR + REGIME) ===\n";
-
-    int tick = 0;
+    cout << fixed << setprecision(4);
+    cout << "╔══════════════════════════════════════════╗\n";
+    cout << "║    TRADING BOT  |  Symbol: " << symbol
+         << string(14 - symbol.size(), ' ') << "║\n";
+    cout << "╚══════════════════════════════════════════╝\n\n";
 
     //------------------------------------------------//
     // MAIN LOOP
     //------------------------------------------------//
-
-    while (true) {
+    while (running) {
 
         //--------------------------------------------//
-        // FETCH MARKET DATA
+        // 1. FETCH TICK
         //--------------------------------------------//
-
-        string response;
-
-        if (getResponse(symbol, response) < 0) {
-
-            // Retry after failure
-            this_thread::sleep_for(
-                chrono::seconds(2));
-
+        Tick tick_data;
+        if (!fetchTick(symbol, tick_data)) {
+            cerr << "[WARN] Fetch failed, retrying...\n";
+            this_thread::sleep_for(seconds(2));
             continue;
         }
 
-        //--------------------------------------------//
-        // EXTRACT PRICE
-        //--------------------------------------------//
-
-        double price = extractPrice(response);
-
-        if (price <= 0) {
-
-            this_thread::sleep_for(
-                chrono::seconds(2));
-
-            continue;
-        }
+        double price = tick_data.price;
 
         //--------------------------------------------//
-        // STORE PRICE HISTORY
+        // 2. FEED INDICATORS
         //--------------------------------------------//
+        double fema = fastEMA.update(price);
+        double sema = slowEMA.update(price);
+        double rsiVal = rsi14.update(price);
 
-        prices.push_back(price);
+        bbWindow.push(price);
+        BBands bb = bollingerBands(bbWindow);
 
-        // Limit memory usage
-        if (prices.size() > 50)
-            prices.pop_front();
+        // Use real intraday high/low if available
+        double high = (tick_data.dayHigh  > 0) ? tick_data.dayHigh  : price;
+        double low  = (tick_data.dayLow   > 0) ? tick_data.dayLow   : price;
+        double pc   = (tick_data.prevClose > 0) ? tick_data.prevClose : prevPrice;
+        double atrVal = (pc > 0) ? atr14.update(high, low, pc) : 0;
 
-        //--------------------------------------------//
-        // UPDATE INDICATORS
-        //--------------------------------------------//
-
-        double fma = fastMA.update(price);
-
-        double smaSlow = slowMA.update(price);
-
-        double mom = momentum(prices, 5);
-
-        //--------------------------------------------//
-        // UPDATE FEATURES
-        //--------------------------------------------//
-
-        FeatureState fs =
-            features.update(prevPrice,
-                            price,
-                            fma,
-                            smaSlow);
-
-        prevPrice = price;
+        if (tick_data.volume > 0)
+            volWindow.push(tick_data.volume);
 
         //--------------------------------------------//
-        // ACCOUNT EQUITY
+        // 3. EQUITY & DRAWDOWN CHECK
         //--------------------------------------------//
+        double equity = cash + pos.shares * price;
+        maxEquity = max(maxEquity, equity);
 
-        double equity =
-            cash + shares * price;
-
-        // Track maximum historical equity
-        maxEquity =
-            max(maxEquity, equity);
-
-        //--------------------------------------------//
-        // DRAWDOWN PROTECTION
-        //--------------------------------------------//
-
-        if ((maxEquity - equity) / maxEquity
-            > maxDrawdown) {
-
-            cout << "MAX DRAWDOWN HIT. STOPPING.\n";
-
+        if ((maxEquity - equity) / maxEquity > maxDrawdown) {
+            if (pos.shares > 0) {
+                cash += pos.shares * price;
+                trades.push_back({"EMERGENCY_EXIT", price, pos.shares,
+                    (price - pos.entry) * pos.shares, nowStr()});
+                pos = {};
+            }
+            cout << "\n⛔  MAX DRAWDOWN REACHED — BOT HALTED\n";
             break;
         }
 
         //--------------------------------------------//
-        // COOLDOWN TIMER
+        // 4. SIGNAL
         //--------------------------------------------//
+        SignalScore sig = computeSignal(
+            price, fema, sema, rsiVal, bb,
+            atrVal, tick_data.volume, volWindow, prevPrice
+        );
 
-        auto now =
-            chrono::steady_clock::now();
-
-        bool cooldownPassed =
-            (now - lastTradeTime)
-            > chrono::seconds(cooldownSec);
+        bool cooldownOk = (steady_clock::now() - lastTrade) > seconds(cooldownSec);
+        bool indicatorsReady = fastEMA.ready() && slowEMA.ready()
+                            && rsi14.ready() && bbWindow.ready();
 
         //--------------------------------------------//
-        // SIGNAL GENERATION
+        // 5a. ENTRY — flat position only
         //--------------------------------------------//
+        if (pos.shares == 0 && cooldownOk && indicatorsReady) {
 
-        bool trendUp =
-            fma > smaSlow;
+            if (sig.score >= minBuyScore) {
 
-        bool trendDown =
-            fma < smaSlow;
+                // ATR-based position sizing
+                double stopDist = (atrVal > 0) ? atrVal * 2.0 : price * 0.01;
+                double riskAmt  = equity * riskPerTrade;
+                double shares   = min({riskAmt / stopDist,
+                                       cash / price,
+                                       100.0});
 
-        bool momentumUp =
-            mom > 0.001;
+                if (shares > 0.01) {
+                    pos.shares     = shares;
+                    pos.entry      = price;
+                    pos.stopLoss   = price - stopDist;
+                    pos.takeProfit = price + stopDist * 3.0;  // 3:1 R/R
+                    cash          -= shares * price;
+                    lastTrade      = steady_clock::now();
 
-        /*
-            Only trade if:
-            - regime filter disabled
-            OR
-            - market classified TRENDING
-        */
-        bool allowTrading =
-            !config.useRegime ||
-            (fs.regime == TRENDING);
+                    trades.push_back({"BUY", price, shares, 0, nowStr()});
 
-        //================================================//
-        // ENTRY LOGIC
-        //================================================//
-
-        if (shares == 0.0 &&
-            cooldownPassed &&
-            trendUp &&
-            momentumUp &&
-            allowTrading) {
-
-            /*
-                Stop distance based on ATR.
-                Wider volatility -> smaller position.
-            */
-            double stopDistance =
-                fs.atr * 2.0;
-
-            if (stopDistance <= 0)
-                continue;
-
-            /*
-                Dollar risk allowed.
-            */
-            double riskAmount =
-                equity * riskPerTrade;
-
-            /*
-                Volatility-adjusted sizing.
-            */
-            double newShares =
-                riskAmount / stopDistance;
-
-            /*
-                Position caps:
-                - cannot exceed available cash
-                - hard cap at 100 shares
-            */
-            newShares =
-                min(newShares,
-                    cash / price);
-
-            newShares =
-                min(newShares, 100.0);
-
-            //--------------------------------------------//
-            // EXECUTE BUY
-            //--------------------------------------------//
-
-            if (newShares > 0) {
-
-                shares = newShares;
-
-                cash -= shares * price;
-
-                entry = price;
-
-                lastTradeTime = now;
-
-                cout << "BUY @ " << price
-                     << " | ATR: " << fs.atr
-                     << " | Regime: TREND\n";
-            }
-        }
-
-        //================================================//
-        // EXIT LOGIC
-        //================================================//
-
-        else if (shares > 0.0) {
-
-            /*
-                ATR-based stop-loss
-            */
-            double stopLoss =
-                entry - (fs.atr * 2.0);
-
-            /*
-                ATR-based take-profit
-            */
-            double takeProfit =
-                entry + (fs.atr * 4.0);
-
-            //--------------------------------------------//
-            // TAKE PROFIT
-            //--------------------------------------------//
-
-            if (price >= takeProfit) {
-
-                cash += shares * price;
-
-                shares = 0.0;
-
-                lastTradeTime = now;
-
-                cout << "TAKE PROFIT @ "
-                     << price << "\n";
-            }
-
-            //--------------------------------------------//
-            // STOP LOSS / TREND REVERSAL
-            //--------------------------------------------//
-
-            else if (price <= stopLoss ||
-                     trendDown) {
-
-                cash += shares * price;
-
-                shares = 0.0;
-
-                lastTradeTime = now;
-
-                cout << "EXIT @ "
-                     << price << "\n";
+                    cout << "🟢 BUY  @ " << price
+                         << " | Shares: "  << shares
+                         << " | SL: "      << pos.stopLoss
+                         << " | TP: "      << pos.takeProfit
+                         << "\n   Signals: " << sig.reasons << "\n\n";
+                }
             }
         }
 
         //--------------------------------------------//
-        // RECALCULATE EQUITY
+        // 5b. EXIT — manage open position
         //--------------------------------------------//
+        else if (pos.shares > 0) {
 
-        equity =
-            cash + shares * price;
+            // Trailing stop: raise floor as price climbs
+            double newStop = price - atrVal * 2.0;
+            if (newStop > pos.stopLoss)
+                pos.stopLoss = newStop;
+
+            bool hitTP    = price >= pos.takeProfit;
+            bool hitSL    = price <= pos.stopLoss;
+            bool signalExit = sig.score <= minSellScore;
+
+            if (hitTP || hitSL || signalExit) {
+                double proceeds = pos.shares * price;
+                double pnl      = (price - pos.entry) * pos.shares;
+                cash           += proceeds;
+
+                string reason = hitTP ? "TAKE_PROFIT" : hitSL ? "STOP_LOSS" : "SIGNAL_EXIT";
+                trades.push_back({reason, price, pos.shares, pnl, nowStr()});
+
+                cout << (pnl >= 0 ? "🔵" : "🔴")
+                     << " " << reason
+                     << " @ " << price
+                     << " | PnL: $" << pnl
+                     << " | Reason: " << sig.reasons << "\n\n";
+
+                pos = {};
+                lastTrade = steady_clock::now();
+            }
+        }
 
         //--------------------------------------------//
-        // STATUS LOGGING
+        // 6. STATUS (every 3 ticks)
         //--------------------------------------------//
-
         if (tick % 3 == 0) {
-
-            cout << "Price: " << price
-                 << " | ATR: " << fs.atr
-                 << " | Regime: "
-                 << (fs.regime == TRENDING
-                     ? "TREND"
-                     : "RANGE")
-                 << " | FastMA: " << fma
-                 << " | SlowMA: " << smaSlow
-                 << "\n";
-
-            cout << "Cash: " << cash
-                 << " | Equity: " << equity
+            equity = cash + pos.shares * price;
+            cout << "[" << nowStr() << "] "
+                 << symbol << " $" << price
+                 << " | EMA9: " << fema
+                 << " | EMA21: " << sema
+                 << " | RSI: " << rsiVal
+                 << " | BB%: " << bb.pctB
+                 << " | ATR: " << atrVal
+                 << "\n"
+                 << "         Cash: $" << cash
+                 << " | Equity: $" << equity
+                 << " | Score: "   << sig.score
+                 << " | "          << (pos.shares > 0 ? "IN POSITION" : "FLAT")
                  << "\n\n";
         }
 
+        prevPrice = price;
         tick++;
-
-        //--------------------------------------------//
-        // LOOP DELAY
-        //--------------------------------------------//
-
-        this_thread::sleep_for(
-            chrono::seconds(5));
+        this_thread::sleep_for(seconds(pollSec));
     }
+
+    //------------------------------------------------//
+    // FINAL SUMMARY
+    //------------------------------------------------//
+    cout << "\n══════════════ TRADE SUMMARY ══════════════\n";
+    double totalPnL = 0;
+    int wins = 0, losses = 0;
+    for (auto& t : trades) {
+        if (t.type != "BUY") {
+            totalPnL += t.pnl;
+            if (t.pnl >= 0) wins++; else losses++;
+            cout << t.time << " " << t.type
+                 << " @ $" << t.price
+                 << " | PnL: $" << t.pnl << "\n";
+        }
+    }
+
+    double finalEquity = cash + pos.shares * (prevPrice > 0 ? prevPrice : 0);
+    cout << "────────────────────────────────────────────\n";
+    cout << "Final equity : $" << finalEquity << "\n";
+    cout << "Total PnL    : $" << totalPnL << "\n";
+    cout << "Trades       : " << (wins + losses) << " | Wins: " << wins << " | Losses: " << losses << "\n";
+    if (wins + losses > 0)
+        cout << "Win rate     : " << (100.0 * wins / (wins + losses)) << "%\n";
 
     return 0;
 }
-
-
-
-
