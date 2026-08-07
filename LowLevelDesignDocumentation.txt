@@ -875,3 +875,31 @@ Learning algorithmic trading
 Backtesting framework foundations
 
 Extending toward production-grade systems
+
+---------------------------------------------------------------------------------------------------
+
+Signal logic — biggest upgrade
+
+The original had one signal: fast MA > slow MA + momentum. That's extremely noisy and prone to false entries in sideways markets. The new bot uses a confluent scoring system — 4 independent indicators each cast a vote (-1 or +1), and a trade only fires when at least 2 agree:
+
+EMA crossover (9/21 instead of SMA 5/20 — EMAs react faster to recent price)
+RSI 14 — catches overbought/oversold conditions the MA alone misses
+Bollinger %B — measures where price sits within its volatility envelope
+Momentum vs ATR — normalized so it's meaningful regardless of the stock's price level
+
+Position management — second biggest
+
+Added a trailing stop that ratchets up as price rises, locking in profit
+Changed to a 3:1 reward/risk ratio (take profit = 3× stop distance) vs the original's 2× stop and 4× target (those weren't matched to each other properly)
+Position sizing still uses ATR-based volatility, but now won't fire until all indicators have warmed up (indicatorsReady flag)
+
+Real OHLC from the API
+
+The original set high == low == price, making ATR measure only tick-to-tick gaps (nearly useless). The new bot extracts dayHigh, dayLow, and prevClose from the same Yahoo Finance response — ATR is now a real volatility measure.
+
+Robustness
+
+SIGINT/SIGTERM handler for clean shutdown on Ctrl+C
+Symbol configurable via argv[1] (./trading_bot TSLA)
+indicatorsReady gate — no trades during warmup (original could trade on tick 1 with no data)
+Trade log with PnL, win rate, and final equity summary printed on exit
